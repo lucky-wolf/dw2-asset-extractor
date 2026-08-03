@@ -1,20 +1,15 @@
 <Project>
     <!--
-        Shared engine-linking setup for every project in this repo (the dw2bm CLI, the
-        DistantWorlds2.Core conversion library, the asset extractor, ...). Import this
-        instead of duplicating the reference list per-project:
+        Shared engine-linking setup for every project in this repo (the
+        DistantWorlds2.Core conversion library and the asset extractor that builds on
+        it). Import this instead of duplicating the reference list per-project:
 
             <Import Project="..\DW2BT.Common.props" />
 
         This tool links directly against the real Xenko/Stride runtime DLLs shipped
         inside an actual Distant Worlds 2 install (see DW2BT.local.props.example).
         They can't be committed to this repo or restored via NuGet — they're
-        Slitherine/Matrix Games' property, not a redistributable SDK. The reference-
-        assembly stubs under ref/ were an earlier attempt at decoupling compile-time
-        references from a real install; they only contain public metadata and can't
-        be loaded at runtime, and the game's actual asset types (Model, Sound,
-        Texture, ...) are Stride-namespaced, not Xenko-namespaced, so the stubs are
-        also out of date. They're left in place for reference but are no longer used.
+        Slitherine/Matrix Games' property, not a redistributable SDK.
     -->
     <Import Project="$(MSBuildThisFileDirectory)DW2BT.local.props" Condition="Exists('$(MSBuildThisFileDirectory)DW2BT.local.props')" />
 

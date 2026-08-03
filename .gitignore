@@ -17,3 +17,7 @@ DW2BT.local.props
 [Oo]bj/
 .vs/
 *.user
+
+# Claude Code project context — internal dev notes, not for public/user consumption
+/CLAUDE.md
+/.claude/

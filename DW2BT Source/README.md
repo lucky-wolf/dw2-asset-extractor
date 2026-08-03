@@ -1,136 +1,52 @@
-# Distant Worlds 2 Bundle Tool (DW2BT)
+# Distant Worlds 2 Asset Extractor (dw2extract)
 
-Extracts assets from DW2 `.bundle` files and converts them to standard formats:
-textures → `.dds`, sounds → `.wav`/etc, meshes → `.fbx`, shaders → `.sdsl` source.
-This tool only extracts/converts to your local disk — it does not repackage bundles
-or insert anything back into the game.
+Extracts every asset from DW2's `.bundle` files and converts it to a standard
+format: textures → `.dds`/`.png`, sounds → `.wav`, meshes → `.fbx`, shaders →
+`.sdsl` source, everything else copied as-is. This tool only extracts/converts
+to your local disk — it does not repackage bundles or insert anything back into
+the game.
 
-Two executables, sharing the same conversion code:
-- **`dw2bm`** (`DistantWorlds2.BundleManager`) — the original precise, per-asset CLI:
-  list bundles, list/identify/extract individual files, convert one at a time.
-- **`dw2extract`** (`DistantWorlds2.AssetExtractor`) — point it at your DW2 install
-  and an output folder, and it walks *every* bundle, converting and recreating the
-  full folder structure automatically. See [Asset Extractor](#asset-extractor) below.
-
-Both build on **`DistantWorlds2.Core`**, a class library holding the actual
-conversion logic (texture/sound/mesh conversion, bundle reading) — fix something
-there and both tools pick it up.
+Two projects:
+- **`DistantWorlds2.Core`** — class library holding the actual conversion logic
+  (texture/sound/mesh conversion, bundle reading).
+- **`DistantWorlds2.AssetExtractor`** (`dw2extract`) — the CLI/GUI-hybrid tool
+  itself. Point it at your DW2 install and an output folder, and it walks every
+  bundle you select, converting and recreating the full folder structure
+  automatically.
 
 ## One-time setup
 
-1. **Point the build at your DW2 install.** The real Xenko/Stride engine DLLs these
-   tools link against ship with the game itself — they can't be bundled with this
-   repo (they're Slitherine/Matrix Games' property, not a redistributable SDK).
+1. **Point the build at your DW2 install.** The real Xenko/Stride engine DLLs
+   this tool links against ship with the game itself — they can't be bundled
+   with this repo (they're Slitherine/Matrix Games' property, not a
+   redistributable SDK).
 
    Copy `DW2BT.local.props.example` to `DW2BT.local.props` (same folder, next to
    this README) and edit the path:
    ```xml
    <DW2GameDir>C:\Steam\steamapps\common\Distant Worlds 2</DW2GameDir>
    ```
-   `DW2BT.local.props` is gitignored — it's machine-specific. Both `dw2bm` and
-   `dw2extract` import this same setup (`DW2BT.Common.props`), so it only needs
-   doing once.
+   `DW2BT.local.props` is gitignored — it's machine-specific.
 
 2. **Build:**
    ```
-   dotnet build DistantWorlds2.BundleManager.sln
+   dotnet build DistantWorlds2.AssetExtractor.sln
    ```
-   This produces `DistantWorlds2.BundleManager\bin\Debug\net8.0-windows\dw2bm.exe`
-   and `DistantWorlds2.AssetExtractor\bin\Debug\net8.0-windows\dw2extract.exe`,
-   each with all the engine DLLs and native libraries (`x64\*.dll`) copied alongside
+   This produces `DistantWorlds2.AssetExtractor\bin\Debug\net8.0-windows\dw2extract.exe`,
+   with all the engine DLLs and native libraries (`x64\*.dll`) copied alongside
    automatically.
 
-3. **Give `dw2bm` access to bundle data.** (`dw2extract` doesn't need this step —
-   see below, it takes the install folder as an input instead.) `dw2bm` resolves
-   bundles relative to its *own folder* (`<exe folder>\data\db\bundles\`), not your
-   current directory. The cleanest way to satisfy that without duplicating
-   gigabytes of game data is a directory junction pointing at the game's own
-   bundles:
-   ```powershell
-   $out = "D:\path\to\DW2BT Source\DistantWorlds2.BundleManager\bin\Debug\net8.0-windows"
-   New-Item -ItemType Directory -Path "$out\data\db" -Force
-   New-Item -ItemType Junction -Path "$out\data\db\bundles" `
-       -Target "C:\Steam\steamapps\common\Distant Worlds 2\data\db\bundles"
-   ```
-   (Simplest alternative: just copy `dw2bm.exe` + its output folder into the game
-   install folder itself and run it from there — `data\db\bundles` is already
-   sitting right next to it.)
+3. **Sound/PNG conversion needs FFmpeg.** Put `ffmpeg.exe`/`ffprobe.exe` on your
+   `PATH`, or copy them into the same output folder as `dw2extract.exe`.
 
-4. **Sound conversion needs FFmpeg.** Put `ffmpeg.exe`/`ffprobe.exe` on your `PATH`,
-   or copy them into the same output folder as `dw2bm.exe`/`dw2extract.exe`.
+## Running it
 
-Run everything below from that output folder (or add it to your `PATH`).
-Destination paths in the commands below are relative to wherever you run
-`dw2bm.exe` *from* — bundle resolution is exe-relative, output paths are cwd-relative.
-
-## Commands
-
-**`dw2bm lb`** — list available bundles (by name, without the hash suffix).
-```
-dw2bm lb
-```
-
-**`dw2bm ls <bundle> [glob]`** — list files inside a bundle.
-```
-dw2bm ls CoreContent "Sounds/**"
-dw2bm ls Human "Ships/Human/**"
-```
-
-**`dw2bm id <bundle> <asset path>`** (or `dw2bm id <loose file>`) — show an asset's
-type, e.g. `Stride.Rendering.Model`, `Stride.Audio.Sound`, `Stride.Graphics.Texture`.
-Useful for figuring out what something is before extracting it.
-```
-dw2bm id CoreContent "Creatures/knight"
-```
-
-**`dw2bm ex <bundle> <asset path> <dest file>`** — extract one file, raw.
-**`dw2bm ex <bundle> <glob> <dest folder>`** — extract everything matching a glob.
-```
-dw2bm ex CoreContent "shaders/DWColor.sdsl" DWColor.sdsl
-dw2bm ex CoreContent "Sounds/**" extracted/Sounds/
-```
-
-**`dw2bm xt <extracted texture file> <dest.dds>`** — convert an extracted texture
-to `.dds`. Works for both small embedded textures and large streaming textures
-(needs the matching `_Data` file alongside the source, which `ex` extracts for you
-automatically when there is one).
-```
-dw2bm ex CoreContent "UserInterface/Textures/circle01" circle01
-dw2bm xt circle01 circle01.dds
-```
-
-**`dw2bm xs <extracted sound file> <dest.wav>`** (or glob form) — convert an
-extracted sound to `.wav`/etc via FFmpeg.
-```
-dw2bm ex CoreContent "Sounds/Components/TractorBeam" TractorBeam
-dw2bm xs TractorBeam TractorBeam.wav
-```
-
-**`dw2bm xm <bundle> <model asset path> <dest.fbx>`** — export a mesh (and its
-skeleton, if it has one) straight from the bundle to binary FBX. No separate `ex`
-step needed — this one loads directly from the bundle.
-```
-dw2bm xm CoreContent "Creatures/knight" knight.fbx
-dw2bm xm Human "Ships/Human/human_battleship" battleship.fbx
-```
-Exports geometry (positions/normals/UVs) and the full node hierarchy (skeleton
-bones, or hardpoint markers like `#weaponVerticalLauncherLarge9` for ships) with
-each mesh parented under its correct node. Does **not** export bone-weight/skinning
-data (fine for ship hardpoint structure; a skinned character like the knight
-exports its shape correctly but won't be posable) or materials/textures (pull
-those separately with `xt`).
-
-Shader source (`.sdsl` entries under `shaders/`) extracts via plain `ex` — it's
-raw text in the bundle, not compiled bytecode, so no conversion step is needed.
-
-## Asset Extractor
-
-`dw2extract.exe` needs no setup beyond the build steps above — run it and it asks
-(via folder-browse dialogs) for your DW2 install folder, then which bundles to
-extract, then which asset types to extract (both are checklists, all checked by
-default — use Select All/Select None to speed up picking just a few), then
-where to save extracted assets. It doesn't need the `data\db\bundles` junction
-`dw2bm` does: it mounts whatever install folder you pick at runtime.
+`dw2extract.exe` needs no setup beyond the build steps above — run it and it
+asks (via folder-browse dialogs) for your DW2 install folder, then which
+bundles to extract, then which asset types to extract (both are checklists,
+all checked by default — use Select All/Select None to speed up picking just a
+few), then where to save extracted assets. It mounts whatever install folder
+you pick at runtime, so it doesn't need any junction or copy-into-place step.
 
 It then walks every selected bundle and recreates the game's own folder
 structure under your chosen output folder, one subfolder per bundle
@@ -145,10 +61,18 @@ type checklist controls which of these happen:
   outright (unmanaged, uncatchable) on floating-point/HDR textures like BRDF
   LUTs.
 - Sounds → `.wav`
-- Meshes → `.fbx` (same coverage/limitations as `dw2bm xm` — see above)
+- Meshes → `.fbx` — exports geometry (positions/normals/UVs) and the full node
+  hierarchy (skeleton bones, or hardpoint markers like
+  `#weaponVerticalLauncherLarge9` for ships) with each mesh parented under its
+  correct node. Does **not** export bone-weight/skinning data (fine for ship
+  hardpoint structure; a skinned character exports its shape correctly but
+  won't be posable) or materials/textures (those come out as separate texture
+  files via the Textures option above).
 - Everything else / unsupported (shader source, XML/data files, ...) — copied
   as-is, unconverted, under its own "misc/unsupported" checklist entry so you
-  can still see what's in a bundle even for types this tool doesn't convert
+  can still see what's in a bundle even for types this tool doesn't convert.
+  Shader source (`.sdsl` entries under `shaders/`) needs no conversion step —
+  it's raw text in the bundle, not compiled bytecode.
 
 Each bundle's subfolder contains exactly that bundle's *own* declared assets — no
 cross-bundle deduplication, and no attempt to resolve which version "wins" at
@@ -173,9 +97,8 @@ and asset-type checklists to extract just what you need instead.
 
 ## Not yet covered
 
-- `tx`, `txs`, `sx`, `mb`, `xu` are for the *reverse* direction (packing assets back
-  into the game's format / building bundles) — out of scope for this tool and not
-  something this pass touched.
+- Nothing in this tool packs assets back into the game's format or rebuilds
+  bundles — extraction/conversion only, by design.
 - No tooling yet to distinguish DW2's own custom shaders from Stride's bundled
   engine shader library within a bulk extraction — `grep`/search the extracted
   `.sdsl` files' `namespace` line (DW2's own use `namespace DistantWorlds2`) or
