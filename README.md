@@ -2,10 +2,43 @@
 
 A modding tool for [Distant Worlds 2](https://www.matrixgames.com/game/distant-worlds-2)
 (a Slitherine/Matrix Games 4X built on the Stride/Xenko engine). Point it at your
-DW2 install, pick which bundles and asset types you want, and it walks the
-game's `.bundle` files and converts everything to standard formats on your
-local disk: textures → `.dds`/`.png`, sounds → `.wav`, meshes → `.fbx`, shader
-source and anything else copied as-is.
+DW2 install, and it walks the game's `.bundle` files and converts everything to
+standard formats on your local disk.
+
+## What it does
+
+Run `dw2extract.exe` and it walks you through two checklists, then asks where
+to save the output:
+
+- **Which bundles to pull from** — `CoreContent`, `Human`, `Abandoned`,
+  `Creatures`, one per race/content pack, however many DW2 ships with. All
+  selected by default; pick just one or two if you don't want the whole ~30-40
+  GB catalog.
+- **Which asset types to extract:**
+  - Textures → `.dds` and/or `.png`, independently — pick one, the other, or
+    both.
+  - Sounds → `.wav`.
+  - Meshes → `.fbx` — geometry, skeleton/hardpoint hierarchy, **and** its
+    materials and textures, already linked. Diffuse, normal, and emissive maps
+    are wired in automatically (this pulls in PNG export too, whether or not
+    you checked it, since the mesh needs it), so a model opens in Blender
+    already textured — not just bare gray geometry. See
+    [`dw2-asset-extractor-source/README.md`](dw2-asset-extractor-source/README.md#running-it)
+    for the details on what does and doesn't come through (e.g. Stride's
+    packed PBR maps end up as custom material properties rather than a wrong
+    texture slot, and skinned characters export their shape but aren't
+    posable — no bone-weight data).
+  - Everything else (shader source, XML/data files, ...) copied as-is, so you
+    can still see what's in a bundle even for types this tool doesn't convert.
+
+Output is organized one subfolder per bundle, mirroring the game's own
+folder structure — and deliberately **not** deduplicated across bundles: DW2
+routinely has more than one bundle declare its own version of the same asset
+path, and this tool surfaces every one of them rather than guessing which the
+game actually uses at runtime.
+
+Your install folder and output folder are remembered between runs, so you're
+not re-browsing for them every single time.
 
 **Extraction/conversion only** — this tool does not repackage bundles or insert
 anything back into the game.

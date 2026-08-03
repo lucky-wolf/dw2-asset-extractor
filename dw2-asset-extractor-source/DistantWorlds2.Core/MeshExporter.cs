@@ -5,6 +5,7 @@ using Stride.Core.IO;
 using Stride.Graphics;
 using Stride.Graphics.Data;
 using Stride.Rendering;
+using Stride.Rendering.Materials;
 using StrideBuffer = Stride.Graphics.Buffer;
 
 namespace DistantWorlds2.Core;
@@ -18,11 +19,23 @@ public static class MeshExporter
         ContentFilter = ContentManagerLoaderSettings.NewContentFilterByType(typeof(StrideBuffer))
     };
 
+    // Same idea, one level further down the reference graph: loading a Material this way resolves its
+    // parameter data (which textures are bound to which shader keys) without trying to fully deserialize
+    // those Textures themselves — which, like above, would need a live GraphicsDevice and just crashes
+    // (NullReferenceException) without one. The Texture objects that come back are unresolved proxies;
+    // AttachedReferenceManager.GetAttachedReference(...) still gives their bundle URL, which is all we need.
+    private static readonly ContentManagerLoaderSettings MaterialOnlySettings = new()
+    {
+        ContentFilter = ContentManagerLoaderSettings.NewContentFilterByType(typeof(Material))
+    };
+
     // vfsRoot lets callers point this at a bundle set outside the executable's own directory (which is
     // where Stride's own VirtualFileSystem — a separate static registry from Xenko's — resolves relative
     // to by default). Pass a root you've already mounted via Stride.Core.IO.VirtualFileSystem.MountFileSystem;
     // null keeps the default exe-relative behavior dw2bm's "xm" command relies on.
-    public static async Task<int> ExportToFbx(string bundleName, string modelUrl, string destPath, string? vfsRoot = null)
+    // outputDir + bundleName let material texture references be resolved into paths relative to destPath
+    // — see BuildMaterialData — matching exactly where the main extraction loop puts a bundle's textures.
+    public static async Task<int> ExportToFbx(string bundleName, string modelUrl, string destPath, string outputDir, string? vfsRoot = null)
     {
         var odb = vfsRoot == null
             ? ObjectDatabase.CreateDefaultDatabase()
@@ -85,6 +98,12 @@ public static class MeshExporter
             });
         }
 
+        if (model.Materials != null)
+        {
+            foreach (var materialInstance in model.Materials)
+                scene.Materials.Add(BuildMaterialData(contentManager, odb, materialInstance, destPath, outputDir, bundleName));
+        }
+
         if (model.Meshes != null)
         {
             var nameCounts = new Dictionary<string, int>();
@@ -93,6 +112,10 @@ public static class MeshExporter
                 var meshData = ExtractMesh(mesh, scene.Nodes.Count);
                 if (meshData == null)
                     continue;
+
+                meshData.MaterialIndex = mesh.MaterialIndex >= 0 && mesh.MaterialIndex < scene.Materials.Count
+                    ? mesh.MaterialIndex
+                    : -1;
 
                 var baseName = string.IsNullOrEmpty(mesh.Name) ? "Mesh" : mesh.Name;
                 var count = nameCounts.TryGetValue(baseName, out var c) ? c : 0;
@@ -110,6 +133,67 @@ public static class MeshExporter
         Console.WriteLine($"{bundleName}:{modelUrl} -> {destPath}");
         Console.WriteLine($"  {scene.Nodes.Count} nodes, {scene.Meshes.Count} meshes" + (skeleton == null ? " (no skeleton)" : ""));
         return 0;
+    }
+
+    private static FbxMaterialData BuildMaterialData(ContentManager contentManager, ObjectDatabase odb, MaterialInstance materialInstance, string destPath, string outputDir, string bundleName)
+    {
+        var materialUrl = AttachedReferenceManager.GetAttachedReference(materialInstance.Material)?.Url;
+        // "NoMaterial" rather than something generic like "Material" — Blender treats "Material" as its
+        // own default name and silently renames ours to "Material.001" on collision, which is confusing
+        // in the outliner even though it's functionally harmless.
+        var data = new FbxMaterialData { Name = materialUrl != null ? materialUrl.Split('/')[^1] : "NoMaterial" };
+        if (materialUrl == null)
+            return data; // this material slot exists but has nothing assigned — leave it textureless, not an error
+
+        Material material;
+        try
+        {
+            material = contentManager.Load<Material>(materialUrl, MaterialOnlySettings);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  Warning: failed to load material '{materialUrl}': {ex.Message}");
+            return data;
+        }
+
+        var parameters = material.Passes?.FirstOrDefault()?.Parameters;
+        if (parameters == null)
+            return data;
+
+        var destDir = Path.GetDirectoryName(destPath)!;
+
+        string? ResolveTexturePath(ObjectParameterKey<Texture> key)
+        {
+            if (!parameters.ContainsKey(key))
+                return null;
+            var textureUrl = AttachedReferenceManager.GetAttachedReference(parameters.Get(key, false))?.Url;
+            // Only link to textures this bundle actually declares an entry for — excludes Stride's own
+            // built-in resources (e.g. the PBR environment lighting LUT, which isn't game content and
+            // was never going to be extracted) and cross-bundle references this pass can't resolve a
+            // predictable output path for.
+            if (textureUrl == null || !odb.ContentIndexMap.TryGetValue(textureUrl, out _))
+                return null;
+            var textureDestPath = Path.Combine(outputDir, bundleName, AssetUrlPaths.Sanitize(textureUrl) + ".png");
+            return Path.GetRelativePath(destDir, textureDestPath);
+        }
+
+        data.DiffuseTexturePath = ResolveTexturePath(MaterialKeys.DiffuseMap);
+        data.NormalTexturePath = ResolveTexturePath(MaterialKeys.NormalMap);
+        data.EmissiveTexturePath = ResolveTexturePath(MaterialKeys.EmissiveMap);
+
+        // Deliberately NOT wired into any FBX material slot — see FbxMaterialData's doc comment.
+        foreach (var (label, key) in new (string, ObjectParameterKey<Texture>)[]
+                 {
+                     ("GlossinessMap", MaterialKeys.GlossinessMap),
+                     ("MetalnessMap", MaterialKeys.MetalnessMap),
+                     ("AmbientOcclusionMap", MaterialKeys.AmbientOcclusionMap),
+                 })
+        {
+            if (ResolveTexturePath(key) is { } path)
+                data.ExtraTextureProperties[label] = path;
+        }
+
+        return data;
     }
 
     private static FbxMeshData? ExtractMesh(Mesh mesh, int nodeCount)

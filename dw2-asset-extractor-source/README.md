@@ -83,8 +83,27 @@ type checklist controls which of these happen:
   `#weaponVerticalLauncherLarge9` for ships) with each mesh parented under its
   correct node. Does **not** export bone-weight/skinning data (fine for ship
   hardpoint structure; a skinned character exports its shape correctly but
-  won't be posable) or materials/textures (those come out as separate texture
-  files via the Textures option above).
+  won't be posable).
+
+  Materials and textures come along too — selecting FBX automatically pulls
+  in PNG export as well (there's no point linking a texture that never gets
+  extracted), so the exported model opens in Blender already textured: base
+  color, emissive, and normal maps are wired directly into the material.
+  Glossiness/Metalness/AmbientOcclusion maps are *not* wired into a texture
+  slot — Stride typically packs those three into channels of one shared
+  texture (e.g. R=Metalness/G=Glossiness/B=AO for a given material — verify
+  per-material, this isn't universal), and classic FBX materials have no slot
+  that means "the red channel of this texture." Forcing them into a
+  wrong-meaning slot (e.g. "Specular") would be actively misleading. Instead
+  they show up as plain custom properties on the material (visible in
+  Blender's Material Properties → Custom Properties panel) naming the exact
+  packed texture file — enough for a technical artist to wire up manually
+  (one Separate Color node) or hand straight to Marmoset Toolbag/Substance for
+  channel-packed editing, without this tool having invented a new unpacked
+  texture format that the game itself doesn't understand. Only textures the
+  bundle actually declares get linked — built-in Stride engine resources
+  (e.g. PBR environment lighting LUTs) and cross-bundle texture references are
+  silently skipped rather than pointing at a file that won't exist.
 - Everything else / unsupported (shader source, XML/data files, ...) — copied
   as-is, unconverted, under its own "misc/unsupported" checklist entry so you
   can still see what's in a bundle even for types this tool doesn't convert.

@@ -135,6 +135,12 @@ public static class Program
             assetTypes = pickedTypes.Value;
         }
 
+        // FBX export links each mesh's materials to their texture files (see MeshExporter) — those
+        // links are only useful if the referenced PNGs actually get extracted in this same run, so FBX
+        // always pulls PNG in with it, regardless of what was (or wasn't) checked in the dialog above.
+        if (assetTypes.HasFlag(AssetKindFlags.Fbx))
+            assetTypes |= AssetKindFlags.Png;
+
         if (outputDir == null)
         {
             outputDir = ConfirmOrPickFolder(settings!.OutputDir,
@@ -293,6 +299,18 @@ public static class Program
             foreach (var (label, _) in AssetTypeOptions)
                 listBox.Items.Add(label, true);
 
+            // FBX export needs PNG textures to link materials to (see MeshExporter) — nudge the user
+            // toward that up front rather than silently overriding their choice after the fact. This is
+            // a one-way convenience, not a hard lock: PNG can still be unchecked afterward, but Main()
+            // forces it back on before extraction if FBX ends up selected regardless.
+            var fbxIndex = Array.FindIndex(AssetTypeOptions, o => o.Flag == AssetKindFlags.Fbx);
+            var pngIndex = Array.FindIndex(AssetTypeOptions, o => o.Flag == AssetKindFlags.Png);
+            listBox.ItemCheck += (_, e) =>
+            {
+                if (e.Index == fbxIndex && e.NewValue == CheckState.Checked)
+                    listBox.SetItemChecked(pngIndex, true);
+            };
+
             var selectAllButton = new Button { Text = "Select All", Left = 10, Top = 200, Width = 90 };
             selectAllButton.Click += (_, _) =>
             {
@@ -401,7 +419,7 @@ public static class Program
 
     private static async Task ExtractOne(ObjectDatabase odb, DatabaseFileProvider fileProvider, string bundleName, string url, string outputDir, AssetKindFlags assetTypes, Stats stats)
     {
-        var destBase = Path.Combine(outputDir, bundleName, SanitizePath(url));
+        var destBase = Path.Combine(outputDir, bundleName, AssetUrlPaths.Sanitize(url));
 
         try
         {
@@ -471,7 +489,7 @@ public static class Program
                 case DW2AssetKind.Model:
                     if (!assetTypes.HasFlag(AssetKindFlags.Fbx))
                         return;
-                    await MeshExporter.ExportToFbx(bundleName, url, destBase + ".fbx", VfsRoot);
+                    await MeshExporter.ExportToFbx(bundleName, url, destBase + ".fbx", outputDir, VfsRoot);
                     stats.Meshes++;
                     break;
 
@@ -497,16 +515,6 @@ public static class Program
         File.Delete(rawPath);
         if (File.Exists(rawPath + "_Data"))
             File.Delete(rawPath + "_Data");
-    }
-
-    private static string SanitizePath(string url)
-    {
-        var parts = url.Split('/');
-        var invalid = Path.GetInvalidFileNameChars();
-        for (int i = 0; i < parts.Length; i++)
-            foreach (var c in invalid)
-                parts[i] = parts[i].Replace(c, '_');
-        return string.Join(Path.DirectorySeparatorChar, parts);
     }
 
     private class Stats

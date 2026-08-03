@@ -58,6 +58,8 @@ public static class FbxBinaryWriter
         AddP(gsProps, "CoordAxisSign", "int", "Integer", 1);
         AddP(gsProps, "UnitScaleFactor", "double", "Number", 100.0);
 
+        // Rough object-count hint — most readers (Blender included) don't strictly enforce this against
+        // the actual object list, so an approximation covering the common case (no materials) is fine.
         var definitions = root.Add("Definitions");
         definitions.Add("Version", 100);
         definitions.Add("Count", scene.Nodes.Count + scene.Meshes.Count * 2);
@@ -76,6 +78,10 @@ public static class FbxBinaryWriter
             meshModelIds[i] = nextId++;
             meshGeomIds[i] = nextId++;
         }
+
+        var materialIds = new long[scene.Materials.Count];
+        for (int i = 0; i < scene.Materials.Count; i++)
+            materialIds[i] = nextId++;
 
         for (int i = 0; i < scene.Nodes.Count; i++)
         {
@@ -150,6 +156,20 @@ public static class FbxBinaryWriter
                 uvLayer.Add("UV", uvArray);
             }
 
+            var hasMaterial = m.MaterialIndex >= 0 && m.MaterialIndex < scene.Materials.Count;
+            if (hasMaterial)
+            {
+                // AllSame: this whole mesh uses one material (matches Stride's per-Mesh MaterialIndex —
+                // there's no per-polygon material switching to represent here), referencing the single
+                // material connected to this mesh's Model via the "OO" Material->Model connection below.
+                var materialLayer = geom.Add("LayerElementMaterial", 0);
+                materialLayer.Add("Version", 101);
+                materialLayer.Add("Name", "");
+                materialLayer.Add("MappingInformationType", "AllSame");
+                materialLayer.Add("ReferenceInformationType", "IndexToDirect");
+                materialLayer.Add("Materials", new[] { 0 });
+            }
+
             var layer = geom.Add("Layer", 0);
             layer.Add("Version", 100);
             var leNormal = layer.Add("LayerElement");
@@ -161,11 +181,86 @@ public static class FbxBinaryWriter
                 leUv.Add("Type", "LayerElementUV");
                 leUv.Add("TypedIndex", 0);
             }
+            if (hasMaterial)
+            {
+                var leMat = layer.Add("LayerElement");
+                leMat.Add("Type", "LayerElementMaterial");
+                leMat.Add("TypedIndex", 0);
+            }
 
             var meshModel = objects.Add("Model", meshModelIds[i], ObjName(m.Name, "Model"), "Mesh");
             meshModel.Add("Version", 232);
             meshModel.Add("Shading", true);
             meshModel.Add("Culling", "CullingOff");
+        }
+
+        // Material -> Texture -> Video objects. Only DiffuseMap/NormalMap/EmissiveMap become real texture
+        // connections (see FbxMaterialData's doc comment for why Glossiness/Metalness/AmbientOcclusion
+        // deliberately don't); those three instead become plain custom string properties on the Material,
+        // discoverable in Blender's material custom properties without claiming a wrong-meaning slot.
+        var materialTextureConnections = new List<(long ChildId, long ParentId, string? Property)>();
+        for (int i = 0; i < scene.Materials.Count; i++)
+        {
+            var mat = scene.Materials[i];
+            var matNode = objects.Add("Material", materialIds[i], ObjName(mat.Name, "Material"), "");
+            matNode.Add("Version", 102);
+            var matProps = matNode.Add("Properties70");
+            AddPFlagged(matProps, "ShadingModel", "KString", "", "", "Phong");
+            AddPFlagged(matProps, "MultiLayer", "bool", "", "", 0);
+            // Base tint is left white/black (rather than sampled from the texture) — the connected
+            // texture supplies the actual color; Blender multiplies the two together on import.
+            AddPFlagged(matProps, "DiffuseColor", "Color", "", "A", 1.0, 1.0, 1.0);
+            AddPFlagged(matProps, "EmissiveColor", "Color", "", "A", mat.EmissiveTexturePath != null ? 1.0 : 0.0, mat.EmissiveTexturePath != null ? 1.0 : 0.0, mat.EmissiveTexturePath != null ? 1.0 : 0.0);
+            foreach (var (label, path) in mat.ExtraTextureProperties)
+                AddPFlagged(matProps, label, "KString", "", "U", path);
+
+            void AddTexture(string slotName, string propertyName)
+            {
+                var relPath = slotName switch
+                {
+                    "DiffuseColor" => mat.DiffuseTexturePath,
+                    "Bump" => mat.NormalTexturePath,
+                    "EmissiveColor" => mat.EmissiveTexturePath,
+                    _ => null,
+                };
+                if (relPath == null)
+                    return;
+
+                var textureId = nextId++;
+                var videoId = nextId++;
+
+                var texNode = objects.Add("Texture", textureId, ObjName($"{mat.Name}_{propertyName}", "Texture"), "");
+                texNode.Add("Type", "TextureVideoClip");
+                texNode.Add("Version", 202);
+                texNode.Add("TextureName", ObjName($"{mat.Name}_{propertyName}", "Texture"));
+                var texProps = texNode.Add("Properties70");
+                AddPFlagged(texProps, "UseMaterial", "bool", "", "", 1);
+                texNode.Add("Media", ObjName($"{mat.Name}_{propertyName}", "Video"));
+                texNode.Add("FileName", relPath);
+                texNode.Add("RelativeFilename", relPath);
+                texNode.Add("ModelUVTranslation", 0.0, 0.0);
+                texNode.Add("ModelUVScaling", 1.0, 1.0);
+                texNode.Add("Texture_Alpha_Source", "None");
+                texNode.Add("Cropping", 0, 0, 0, 0);
+
+                var videoNode = objects.Add("Video", videoId, ObjName($"{mat.Name}_{propertyName}", "Video"), "Clip");
+                videoNode.Add("Type", "Clip");
+                var videoProps = videoNode.Add("Properties70");
+                AddPFlagged(videoProps, "Path", "KString", "XRefUrl", "", relPath);
+                videoNode.Add("UseMipMap", 0);
+                videoNode.Add("Filename", relPath);
+                videoNode.Add("RelativeFilename", relPath);
+
+                materialTextureConnections.Add((videoId, textureId, null));
+                materialTextureConnections.Add((textureId, materialIds[i], propertyName));
+            }
+
+            AddTexture("DiffuseColor", "DiffuseColor");
+            // Classic FBX has no dedicated "this is a tangent-space normal map" slot; "Bump" is the most
+            // broadly recognized property name DCC tools (Blender included) associate with one, though
+            // whether it lands as an actual Normal Map node vs. a height-based bump varies by importer.
+            AddTexture("Bump", "Bump");
+            AddTexture("EmissiveColor", "EmissiveColor");
         }
 
         var connections = root.Add("Connections");
@@ -181,6 +276,17 @@ public static class FbxBinaryWriter
         {
             connections.Add("C", "OO", meshGeomIds[i], meshModelIds[i]);
             connections.Add("C", "OO", meshModelIds[i], nodeModelIds[scene.Meshes[i].NodeIndex]);
+
+            var materialIndex = scene.Meshes[i].MaterialIndex;
+            if (materialIndex >= 0 && materialIndex < materialIds.Length)
+                connections.Add("C", "OO", materialIds[materialIndex], meshModelIds[i]);
+        }
+        foreach (var (childId, parentId, property) in materialTextureConnections)
+        {
+            if (property == null)
+                connections.Add("C", "OO", childId, parentId);
+            else
+                connections.Add("C", "OP", childId, parentId, property);
         }
 
         using var fs = File.Create(destPath);
@@ -203,6 +309,16 @@ public static class FbxBinaryWriter
     private static void AddP(BNode props70, string name, string type, string subType, params object[] values)
     {
         var p = new object[] { name, type, subType, "A" }.Concat(values).ToArray();
+        props70.Add("P", p);
+    }
+
+    // Like AddP, but with an explicit flags column instead of always "A" (Animatable) — needed for
+    // non-animatable properties ("" — e.g. ShadingModel) and user-defined custom properties ("U" — e.g.
+    // the packed-PBR-texture references), which use different conventions than the animatable transform
+    // properties AddP was originally written for.
+    private static void AddPFlagged(BNode props70, string name, string type, string subType, string flags, params object[] values)
+    {
+        var p = new object[] { name, type, subType, flags }.Concat(values).ToArray();
         props70.Add("P", p);
     }
 
