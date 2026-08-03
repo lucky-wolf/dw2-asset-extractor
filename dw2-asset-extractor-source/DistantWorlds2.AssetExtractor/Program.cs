@@ -34,6 +34,10 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+
         AppDomain.CurrentDomain.AssemblyResolve += (_, resolveArgs) =>
         {
             var path = Path.Combine(AppContext.BaseDirectory, new AssemblyName(resolveArgs.Name).Name + ".dll");
@@ -53,12 +57,15 @@ public static class Program
         string? outputDir = args.Length is 2 or 3 ? args[1] : null;
         string? bundleFilter = args.Length == 3 ? args[2] : null;
 
+        var settings = UserSettings.Load();
+        TextureConverter.SetFfmpegTimeoutSeconds(settings.GetTextureFfmpegTimeoutSeconds());
+        SoundConverter.SetFfmpegTimeoutSeconds(settings.GetSoundFfmpegTimeoutSeconds());
+
         bool interactive = installDir == null;
-        var settings = interactive ? UserSettings.Load() : null;
 
         if (installDir == null)
         {
-            var savedInstallDir = settings!.InstallDir;
+            var savedInstallDir = settings.InstallDir;
             if (savedInstallDir != null && !File.Exists(Path.Combine(savedInstallDir, "DistantWorlds2.exe")))
                 savedInstallDir = null; // no longer a valid DW2 install, don't offer to reuse it
 
@@ -143,7 +150,7 @@ public static class Program
 
         if (outputDir == null)
         {
-            outputDir = ConfirmOrPickFolder(settings!.OutputDir,
+            outputDir = ConfirmOrPickFolder(settings.OutputDir,
                 "Use your previously selected output folder?",
                 "Select where extracted assets should be saved");
         }
@@ -155,7 +162,7 @@ public static class Program
 
         if (interactive)
         {
-            settings!.InstallDir = installDir;
+            settings.InstallDir = installDir;
             settings.OutputDir = outputDir;
             settings.Save();
         }
@@ -237,22 +244,22 @@ public static class Program
             foreach (var bundleName in allBundles)
                 listBox.Items.Add(bundleName, true);
 
-            var selectAllButton = new Button { Text = "Select All", Left = 10, Top = 420, Width = 90 };
+            var selectAllButton = new Button { Text = "All", Left = 10, Top = 432, Width = 90, Height = 36 };
             selectAllButton.Click += (_, _) =>
             {
                 for (int i = 0; i < listBox.Items.Count; i++)
                     listBox.SetItemChecked(i, true);
             };
 
-            var selectNoneButton = new Button { Text = "Select None", Left = 105, Top = 420, Width = 90 };
+            var selectNoneButton = new Button { Text = "Clear", Left = 105, Top = 432, Width = 90, Height = 36 };
             selectNoneButton.Click += (_, _) =>
             {
                 for (int i = 0; i < listBox.Items.Count; i++)
                     listBox.SetItemChecked(i, false);
             };
 
-            var okButton = new Button { Text = "OK", Left = 220, Top = 420, Width = 80, DialogResult = DialogResult.OK };
-            var cancelButton = new Button { Text = "Cancel", Left = 305, Top = 420, Width = 85, DialogResult = DialogResult.Cancel };
+            var okButton = new Button { Text = "OK", Left = 220, Top = 432, Width = 80, Height = 36, DialogResult = DialogResult.OK };
+            var cancelButton = new Button { Text = "Cancel", Left = 305, Top = 432, Width = 85, Height = 36, DialogResult = DialogResult.Cancel };
 
             form.Controls.Add(listBox);
             form.Controls.Add(selectAllButton);
@@ -311,22 +318,22 @@ public static class Program
                     listBox.SetItemChecked(pngIndex, true);
             };
 
-            var selectAllButton = new Button { Text = "Select All", Left = 10, Top = 200, Width = 90 };
+            var selectAllButton = new Button { Text = "All", Left = 10, Top = 212, Width = 90, Height = 36 };
             selectAllButton.Click += (_, _) =>
             {
                 for (int i = 0; i < listBox.Items.Count; i++)
                     listBox.SetItemChecked(i, true);
             };
 
-            var selectNoneButton = new Button { Text = "Select None", Left = 105, Top = 200, Width = 90 };
+            var selectNoneButton = new Button { Text = "Clear", Left = 105, Top = 212, Width = 90, Height = 36 };
             selectNoneButton.Click += (_, _) =>
             {
                 for (int i = 0; i < listBox.Items.Count; i++)
                     listBox.SetItemChecked(i, false);
             };
 
-            var okButton = new Button { Text = "OK", Left = 220, Top = 200, Width = 80, DialogResult = DialogResult.OK };
-            var cancelButton = new Button { Text = "Cancel", Left = 305, Top = 200, Width = 85, DialogResult = DialogResult.Cancel };
+            var okButton = new Button { Text = "OK", Left = 220, Top = 212, Width = 80, Height = 36, DialogResult = DialogResult.OK };
+            var cancelButton = new Button { Text = "Cancel", Left = 305, Top = 212, Width = 85, Height = 36, DialogResult = DialogResult.Cancel };
 
             form.Controls.Add(listBox);
             form.Controls.Add(selectAllButton);
@@ -414,6 +421,15 @@ public static class Program
 
         Console.WriteLine();
         Console.WriteLine($"Done. {stats.Textures} textures, {stats.Sounds} sounds, {stats.Meshes} meshes, {stats.Raw} other files copied, {stats.Failures} failed.");
+
+        if (stats.Failures > 0)
+        {
+            Console.WriteLine();
+            WriteYellowLine("Failures:");
+            foreach (var failure in stats.FailureDetails)
+                WriteYellowLine($"  - {failure}");
+        }
+
         return 0;
     }
 
@@ -506,7 +522,22 @@ public static class Program
         catch (Exception ex)
         {
             stats.Failures++;
+            stats.FailureDetails.Add($"{bundleName}:{url} -> {ex.Message}");
             Console.Error.WriteLine($"  FAILED {url}: {ex.Message}");
+        }
+    }
+
+    private static void WriteYellowLine(string text)
+    {
+        var oldColor = Console.ForegroundColor;
+        try
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine(text);
+        }
+        finally
+        {
+            Console.ForegroundColor = oldColor;
         }
     }
 
@@ -520,5 +551,6 @@ public static class Program
     private class Stats
     {
         public int Textures, Sounds, Meshes, Raw, Failures;
+        public List<string> FailureDetails { get; } = [];
     }
 }

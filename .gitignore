@@ -1,5 +1,8 @@
 # DW2 game data / extracted or converted assets — never commit Slitherine/Matrix Games IP
 /test-workspace/
+/Output/*
+!/Output/.gitkeep
+/LastRun.log
 *.bundle
 *.fbx
 *.wav

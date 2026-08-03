@@ -10,7 +10,15 @@ namespace DistantWorlds2.Core
     public static class SoundConverter
     {
         const int SamplesPerFrame = 512;
+        static int FfmpegTimeoutMs = 5 * 60 * 1000;
         static string FFmpegPath = "";
+
+        public static void SetFfmpegTimeoutSeconds(int timeoutSeconds)
+        {
+            if (timeoutSeconds <= 0)
+                return;
+            FfmpegTimeoutMs = timeoutSeconds * 1000;
+        }
 
         public static bool FindFFmpeg()
         {
@@ -43,7 +51,7 @@ namespace DistantWorlds2.Core
 
             return false;
         }
-      
+
         public static void XenkoToSoundfile(string src, string dst)
         {
             if (src.EndsWith("_Data"))
@@ -66,7 +74,7 @@ namespace DistantWorlds2.Core
                 Console.WriteLine($"{src} is not a Sound, skipping");
                 return;
             }
-                
+
             srcFs.Seek(chunkHeader.OffsetToObject+1, SeekOrigin.Begin);
 
             string compressedDataUrl = bsr.ReadString();
@@ -113,17 +121,42 @@ namespace DistantWorlds2.Core
             tempStream.Close();
 
             Directory.CreateDirectory(Path.GetDirectoryName(dst));
-            using var ffmpeg = new System.Diagnostics.Process();
-            ffmpeg.StartInfo.FileName = Path.Combine(FFmpegPath, "ffmpeg.exe");
-            ffmpeg.StartInfo.Arguments = $@"-f f32le -ar {sampleRate} -ac {channels} -i ""{tempFile}"" ""{dst}""";
-            ffmpeg.StartInfo.UseShellExecute = false;
-            ffmpeg.StartInfo.RedirectStandardOutput = true;
-            ffmpeg.StartInfo.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
-            ffmpeg.StartInfo.CreateNoWindow = true;
-            ffmpeg.Start();
-            ffmpeg.WaitForExit();
+            try
+            {
+                using var ffmpeg = new System.Diagnostics.Process();
+                ffmpeg.StartInfo.FileName = Path.Combine(FFmpegPath, "ffmpeg.exe");
+                ffmpeg.StartInfo.ArgumentList.Add("-y");
+                ffmpeg.StartInfo.ArgumentList.Add("-nostdin");
+                ffmpeg.StartInfo.ArgumentList.Add("-loglevel");
+                ffmpeg.StartInfo.ArgumentList.Add("error");
+                ffmpeg.StartInfo.ArgumentList.Add("-f");
+                ffmpeg.StartInfo.ArgumentList.Add("f32le");
+                ffmpeg.StartInfo.ArgumentList.Add("-ar");
+                ffmpeg.StartInfo.ArgumentList.Add(sampleRate.ToString());
+                ffmpeg.StartInfo.ArgumentList.Add("-ac");
+                ffmpeg.StartInfo.ArgumentList.Add(channels.ToString());
+                ffmpeg.StartInfo.ArgumentList.Add("-i");
+                ffmpeg.StartInfo.ArgumentList.Add(tempFile);
+                ffmpeg.StartInfo.ArgumentList.Add(dst);
+                ffmpeg.StartInfo.UseShellExecute = false;
+                ffmpeg.StartInfo.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
+                ffmpeg.StartInfo.CreateNoWindow = true;
+                ffmpeg.Start();
 
-            File.Delete(tempFile);
+                if (!ffmpeg.WaitForExit(FfmpegTimeoutMs))
+                {
+                    try { ffmpeg.Kill(entireProcessTree: true); } catch { }
+                    throw new TimeoutException($"ffmpeg timed out after {FfmpegTimeoutMs / 1000}s while converting sound to WAV");
+                }
+
+                if (ffmpeg.ExitCode != 0 || !File.Exists(dst) || new FileInfo(dst).Length == 0)
+                    throw new InvalidOperationException($"ffmpeg failed to convert sound to WAV (exit code {ffmpeg.ExitCode})");
+            }
+            finally
+            {
+                if (File.Exists(tempFile))
+                    File.Delete(tempFile);
+            }
         }
 
         public static async void SoundToXenko(string src, string root, string assetPath)
@@ -144,7 +177,7 @@ namespace DistantWorlds2.Core
             var tempFile = Path.GetTempFileName();
 
             var options = new FFOptions();
-            options.BinaryFolder = FFmpegPath;            
+            options.BinaryFolder = FFmpegPath;
             GlobalFFOptions.Configure(options);
             try
             {
@@ -166,14 +199,14 @@ namespace DistantWorlds2.Core
             ffmpeg.StartInfo.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
             ffmpeg.StartInfo.CreateNoWindow = true;
             ffmpeg.Start();
-            ffmpeg.WaitForExit();    
+            ffmpeg.WaitForExit();
 
             using var celt = new Celt(48000, SamplesPerFrame, audioStream.Channels, false);
 
             using var tmpReader = new BinaryReader(new FileStream(tempFile, FileMode.Open));
             using var dataOutputStream = new FileStream(dst+"_Data", FileMode.Create);
             using var dataOutputWriter = new BinaryWriter(dataOutputStream);
-            
+
             var length = tmpReader.BaseStream.Length / sizeof(float);
             var padding = audioStream.Channels * celt.GetDecoderSampleDelay();
             var frameSize = SamplesPerFrame * audioStream.Channels;
@@ -217,7 +250,7 @@ namespace DistantWorlds2.Core
 
             using var outputStream = new FileStream(dst, FileMode.Create);
             var outputWriter = new BinarySerializationWriter(outputStream);
-        
+
             var header = new ChunkHeader { Type = typeof(Sound).AssemblyQualifiedName };
             header.Write(outputWriter);
             header.OffsetToReferences = (int)outputWriter.NativeStream.Position;
