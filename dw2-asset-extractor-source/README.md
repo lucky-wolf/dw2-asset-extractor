@@ -20,7 +20,7 @@ Prerequisites: Windows 10/11, a legitimately owned Distant Worlds 2 install
 (Steam or GOG), the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0),
 and [FFmpeg](https://ffmpeg.org/download.html) (`ffmpeg.exe`/`ffprobe.exe`, for
 sound and PNG conversion — step 3 below). See the root `README.md`'s
-"Before you start" section for why each of these is needed.
+"Prerequisites" section for why each of these is needed.
 
 1. **Point the build at your DW2 install.** The real Xenko/Stride engine DLLs
    this tool links against ship with the game itself — they can't be bundled
@@ -48,11 +48,22 @@ sound and PNG conversion — step 3 below). See the root `README.md`'s
 ## Running it
 
 `dw2extract.exe` needs no setup beyond the build steps above — run it and it
-asks (via folder-browse dialogs) for your DW2 install folder, then which
-bundles to extract, then which asset types to extract (both are checklists,
-all checked by default — use Select All/Select None to speed up picking just a
-few), then where to save extracted assets. It mounts whatever install folder
-you pick at runtime, so it doesn't need any junction or copy-into-place step.
+asks for your DW2 install folder, then which bundles to extract, then which
+asset types to extract (both are checklists, all checked by default — use
+Select All/Select None to speed up picking just a few), then where to save
+extracted assets. It mounts whatever install folder you pick at runtime, so it
+doesn't need any junction or copy-into-place step.
+
+The install folder and output folder are remembered between runs (saved to
+`%LocalAppData%\dw2extract\settings.json`). On a repeat run, instead of the
+folder-browse dialog you'll get a Yes/No/Cancel prompt showing the
+previously-used path — **Yes** reuses it, **No** opens the folder browser to
+pick a different one, **Cancel** aborts the run. The very first run (or if the
+remembered install folder no longer contains `DistantWorlds2.exe`, e.g. after
+an uninstall/move) just goes straight to the folder browser as before.
+Whichever folders you end up using — reused or freshly picked — get saved for
+next time. This doesn't apply to the scripted command-line form (see below),
+which never touches the settings file.
 
 It then walks every selected bundle and recreates the game's own folder
 structure under your chosen output folder, one subfolder per bundle

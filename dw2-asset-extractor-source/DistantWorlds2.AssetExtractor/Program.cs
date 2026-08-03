@@ -54,8 +54,18 @@ public static class Program
         string? bundleFilter = args.Length == 3 ? args[2] : null;
 
         bool interactive = installDir == null;
+        var settings = interactive ? UserSettings.Load() : null;
 
-        installDir ??= PickFolder("Select your Distant Worlds 2 install folder (contains DistantWorlds2.exe)");
+        if (installDir == null)
+        {
+            var savedInstallDir = settings!.InstallDir;
+            if (savedInstallDir != null && !File.Exists(Path.Combine(savedInstallDir, "DistantWorlds2.exe")))
+                savedInstallDir = null; // no longer a valid DW2 install, don't offer to reuse it
+
+            installDir = ConfirmOrPickFolder(savedInstallDir,
+                "Use your previously selected Distant Worlds 2 install folder?",
+                "Select your Distant Worlds 2 install folder (contains DistantWorlds2.exe)");
+        }
         if (installDir == null)
         {
             Console.WriteLine("Cancelled.");
@@ -125,11 +135,23 @@ public static class Program
             assetTypes = pickedTypes.Value;
         }
 
-        outputDir ??= PickFolder("Select where extracted assets should be saved");
+        if (outputDir == null)
+        {
+            outputDir = ConfirmOrPickFolder(settings!.OutputDir,
+                "Use your previously selected output folder?",
+                "Select where extracted assets should be saved");
+        }
         if (outputDir == null)
         {
             Console.WriteLine("Cancelled.");
             return 1;
+        }
+
+        if (interactive)
+        {
+            settings!.InstallDir = installDir;
+            settings.OutputDir = outputDir;
+            settings.Save();
         }
 
         Console.WriteLine();
@@ -142,14 +164,38 @@ public static class Program
         return await Extract(installDir, outputDir, selectedBundles, assetTypes);
     }
 
-    private static string? PickFolder(string description)
+    private static string? PickFolderCore(string description)
+    {
+        using var dialog = new FolderBrowserDialog { Description = description, UseDescriptionForTitle = true };
+        return dialog.ShowDialog() == DialogResult.OK ? dialog.SelectedPath : null;
+    }
+
+    // If savedPath is set, asks the user (Yes/No/Cancel) whether to reuse it before falling back to the
+    // normal folder-browser dialog on "No". Returns null on Cancel or if the browser dialog is dismissed.
+    private static string? ConfirmOrPickFolder(string? savedPath, string confirmMessage, string pickerDescription)
     {
         string? result = null;
         var thread = new Thread(() =>
         {
-            using var dialog = new FolderBrowserDialog { Description = description, UseDescriptionForTitle = true };
-            if (dialog.ShowDialog() == DialogResult.OK)
-                result = dialog.SelectedPath;
+            if (savedPath != null)
+            {
+                var choice = MessageBox.Show(
+                    $"{confirmMessage}\n\n{savedPath}",
+                    "Distant Worlds 2 Asset Extractor",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question);
+
+                if (choice == DialogResult.Yes)
+                {
+                    result = savedPath;
+                    return;
+                }
+                if (choice == DialogResult.Cancel)
+                    return;
+                // No -> fall through to the folder browser below.
+            }
+
+            result = PickFolderCore(pickerDescription);
         });
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
