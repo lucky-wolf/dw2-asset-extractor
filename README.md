@@ -14,12 +14,31 @@ There's no downloadable build here — `dw2extract.exe` links directly against
 the real Xenko/Stride/DistantWorlds2 engine DLLs from your own DW2 install,
 which are Slitherine/Matrix Games' property and can't be redistributed. Every
 user builds their own copy (a couple of `dotnet` commands, no Visual Studio
-required) against their own install. Full walkthrough:
-[`DW2BT Source/README.md`](DW2BT%20Source/README.md).
+required) against their own install — that's what the steps below walk you
+through.
 
-## Before you start
+## Getting started
 
-You'll need, before the build/run steps in that walkthrough will work:
+1. **Check the prerequisites below** — you'll need Distant Worlds 2 installed
+   before step 3 (building) will work. Downloading in step 2 has no
+   prerequisites.
+2. **Download this repository.** Either:
+   - On GitHub, click **Code → Download ZIP**, then extract it anywhere, or
+   - Clone it: `git clone https://github.com/salemonz/dw2-asset-extractor.git`
+
+   Everything here is source and docs (no game data, no built binaries), so
+   this is a small download. It includes the
+   [`dw2-asset-extractor-source/`](dw2-asset-extractor-source/) folder, which
+   is what you'll build from.
+3. **Open the `dw2-asset-extractor-source/` folder and follow its README**,
+   starting at "One-time setup":
+   [`dw2-asset-extractor-source/README.md`](dw2-asset-extractor-source/README.md).
+   It walks you through pointing the build at your DW2 install, building with
+   `dotnet`, and running the tool.
+
+## Prerequisites
+
+You'll need, before step 3 above will work:
 
 - **Windows 10/11.** This tool doesn't run cross-platform — it targets
   `net8.0-windows` and links against Windows-only native libraries (Direct3D,
