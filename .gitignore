@@ -1,5 +1,4 @@
 # DW2 game data / extracted or converted assets — never commit Slitherine/Matrix Games IP
-/DW2 CoreContent Bundles/
 /test-workspace/
 *.bundle
 *.fbx
