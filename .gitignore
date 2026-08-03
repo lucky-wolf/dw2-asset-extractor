@@ -2,7 +2,7 @@
 /test-workspace/
 /Output/*
 !/Output/.gitkeep
-/LastRun.log
+/dw2extractor.log
 *.bundle
 *.fbx
 *.wav

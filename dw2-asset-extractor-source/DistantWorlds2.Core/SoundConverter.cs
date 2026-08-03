@@ -60,7 +60,7 @@ namespace DistantWorlds2.Core
             {
                 if(!FindFFmpeg())
                 {
-                    Console.Error.WriteLine("Error: Failed to find FFmpeg.");
+                    RunLogger.Error("Error: Failed to find FFmpeg.");
                     throw new NotSupportedException("Failed to find FFmpeg.");
                 }
             }
@@ -71,7 +71,7 @@ namespace DistantWorlds2.Core
             var chunkHeader = ChunkHeader.Read(bsr);
             if (chunkHeader == null || !chunkHeader.Type.Contains(".Audio.Sound"))
             {
-                Console.WriteLine($"{src} is not a Sound, skipping");
+                RunLogger.Info($"{src} is not a Sound, skipping");
                 return;
             }
 
@@ -165,7 +165,7 @@ namespace DistantWorlds2.Core
             {
                 if (!FindFFmpeg())
                 {
-                    Console.Error.WriteLine("Error: Failed to find FFmpeg.");
+                    RunLogger.Error("Error: Failed to find FFmpeg.");
                     throw new NotSupportedException("Failed to find FFmpeg.");
                 }
             }

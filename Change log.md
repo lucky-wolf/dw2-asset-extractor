@@ -1,6 +1,6 @@
 # Change Log
 
-## 8/3/2026
+## add-scripts
 
 - Added `run` and `build` scripts to make new installs easy
   - available in both `.bat` and `.ps1` format to make it easy for non-programmers to bootstrap this tool
@@ -16,3 +16,11 @@
 - Improved failure detection and reporting so that a list of failures is presented in the summary at the end
 - Defaults to using this repo's Output folder for extracted data (user overridable each time)
 - Updated README.md in the root to call out using `build` and `run` as the easier way to use this tool
+
+## parallel
+
+- Automatically runs the extraction of each bundle in parallel
+- You can set the limit to parallelism via cli or settings file (default is 1/2 your logical cores or whole cpu for small cpus)
+- Automatically generates dw2extractor.log file with details so you can refer back to it
+- Added -v || --verbose mode to generate extra data about parallel performance
+- Added additional summary information for the run as a whole

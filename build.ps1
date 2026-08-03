@@ -710,7 +710,7 @@ Write-Host "Updated DW2BT.local.props: $($script:Summary.WroteLocalProps)"
 
 if (Test-Path -LiteralPath $exePath -PathType Leaf) {
     Write-Host "Build succeeded. Executable: $exePath" -ForegroundColor Green
-    Write-Host "Run command: .\run.ps1" -ForegroundColor Blue
+    Write-Host "Run command: .\run" -ForegroundColor Blue
 }
 else {
     Write-Warn "Build completed, but expected executable path was not found: $exePath"

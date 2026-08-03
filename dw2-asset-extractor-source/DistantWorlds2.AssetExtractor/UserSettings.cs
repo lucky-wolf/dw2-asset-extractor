@@ -8,6 +8,16 @@ namespace DistantWorlds2.AssetExtractor;
 internal sealed class UserSettings
 {
     private const int DefaultFfmpegTimeoutSeconds = 300;
+    private static int DefaultMaxParallelBundles
+    {
+        get
+        {
+            var logicalProcessors = Environment.ProcessorCount;
+            if (logicalProcessors <= 8)
+                return Math.Max(1, logicalProcessors);
+            return Math.Max(1, logicalProcessors / 2);
+        }
+    }
 
     private static readonly string SettingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -22,9 +32,11 @@ internal sealed class UserSettings
     // Specific overrides; if unset/invalid they fall back to FfmpegTimeoutSeconds.
     public int? TextureFfmpegTimeoutSeconds { get; set; }
     public int? SoundFfmpegTimeoutSeconds { get; set; }
+    public int? MaxParallelBundles { get; set; }
 
     public int GetTextureFfmpegTimeoutSeconds() => ResolveTimeout(TextureFfmpegTimeoutSeconds, FfmpegTimeoutSeconds);
     public int GetSoundFfmpegTimeoutSeconds() => ResolveTimeout(SoundFfmpegTimeoutSeconds, FfmpegTimeoutSeconds);
+    public int GetMaxParallelBundles() => MaxParallelBundles is > 0 ? MaxParallelBundles.Value : DefaultMaxParallelBundles;
 
     private static int ResolveTimeout(int? specific, int? generic)
     {
@@ -54,6 +66,12 @@ internal sealed class UserSettings
         if (SoundFfmpegTimeoutSeconds is null or <= 0)
         {
             SoundFfmpegTimeoutSeconds = FfmpegTimeoutSeconds;
+            changed = true;
+        }
+
+        if (MaxParallelBundles is null or <= 0)
+        {
+            MaxParallelBundles = DefaultMaxParallelBundles;
             changed = true;
         }
 

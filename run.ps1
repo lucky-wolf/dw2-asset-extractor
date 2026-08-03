@@ -131,7 +131,7 @@ function Initialize-UserSettings {
 }
 
 $exePath = Join-Path $PSScriptRoot 'dw2-asset-extractor-source\DistantWorlds2.AssetExtractor\bin\Debug\net8.0-windows\dw2extract.exe'
-$logPath = Join-Path $PSScriptRoot 'LastRun.log'
+$env:DW2EXTRACT_LOG_PATH = Join-Path $PSScriptRoot 'dw2extractor.log'
 
 if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
     throw "Built executable not found: $exePath`nRun .\\build.ps1 first."
@@ -143,10 +143,8 @@ $exeDir = Split-Path -Parent $exePath
 
 Push-Location $exeDir
 try {
-    Set-Content -LiteralPath $logPath -Value $null -Encoding UTF8
-    & $exePath @Args 2>&1 | Tee-Object -FilePath $logPath -Append
-    $exitCode = $LASTEXITCODE
-    exit $exitCode
+    & $exePath @Args
+    exit $LASTEXITCODE
 }
 finally {
     Pop-Location

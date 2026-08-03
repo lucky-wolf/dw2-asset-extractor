@@ -52,7 +52,7 @@ public static class MeshExporter
         }
         catch (Exception ex)
         {
-            await Console.Error.WriteLineAsync($"Failed to load model '{modelUrl}' from bundle '{bundleName}': {ex.Message}");
+            RunLogger.Error($"Failed to load model '{modelUrl}' from bundle '{bundleName}': {ex.Message}");
             return 1;
         }
 
@@ -66,7 +66,7 @@ public static class MeshExporter
             }
             catch (Exception ex)
             {
-                await Console.Error.WriteLineAsync($"Warning: failed to load skeleton '{skeletonUrl}': {ex.Message}");
+                RunLogger.Warn($"Warning: failed to load skeleton '{skeletonUrl}': {ex.Message}");
             }
         }
 
@@ -130,8 +130,8 @@ public static class MeshExporter
             FsSafety.EnsureDirectory(destDir);
         FbxBinaryWriter.Write(scene, destPath);
 
-        Console.WriteLine($"{bundleName}:{modelUrl} -> {destPath}");
-        Console.WriteLine($"  {scene.Nodes.Count} nodes, {scene.Meshes.Count} meshes" + (skeleton == null ? " (no skeleton)" : ""));
+        RunLogger.Info($"{bundleName}:{modelUrl} -> {destPath}");
+        RunLogger.Info($"  {scene.Nodes.Count} nodes, {scene.Meshes.Count} meshes" + (skeleton == null ? " (no skeleton)" : ""));
         return 0;
     }
 
@@ -152,7 +152,7 @@ public static class MeshExporter
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"  Warning: failed to load material '{materialUrl}': {ex.Message}");
+            RunLogger.Warn($"  Warning: failed to load material '{materialUrl}': {ex.Message}");
             return data;
         }
 
