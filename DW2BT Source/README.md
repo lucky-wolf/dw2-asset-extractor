@@ -127,24 +127,28 @@ raw text in the bundle, not compiled bytecode, so no conversion step is needed.
 
 `dw2extract.exe` needs no setup beyond the build steps above — run it and it asks
 (via folder-browse dialogs) for your DW2 install folder, then which bundles to
-extract (a checklist, all checked by default — use Select All/Select None to
-speed up picking just one or two), then where to save extracted assets. It
-doesn't need the `data\db\bundles` junction `dw2bm` does: it mounts whatever
-install folder you pick at runtime.
+extract, then which asset types to extract (both are checklists, all checked by
+default — use Select All/Select None to speed up picking just a few), then
+where to save extracted assets. It doesn't need the `data\db\bundles` junction
+`dw2bm` does: it mounts whatever install folder you pick at runtime.
 
-It then walks every bundle and recreates the game's own folder structure under
-your chosen output folder, one subfolder per bundle (`CoreContent\`, `Human\`,
-`Abandoned\`, ...), converting as it goes:
-- Textures → `.dds` **and** `.png` (side by side) — the PNG is via FFmpeg (needs
-  `ffmpeg.exe` on `PATH` or next to the exe, same as sound conversion), not
-  Xenko's own PNG encoder, which turned out to silently mis-decode at least some
-  block-compressed textures and to crash outright (unmanaged, uncatchable) on
-  floating-point/HDR textures like BRDF LUTs. A texture whose format has no sane
-  PNG representation (or that FFmpeg's DDS decoder can't handle) still gets its
-  `.dds`, just without a matching `.png`.
+It then walks every selected bundle and recreates the game's own folder
+structure under your chosen output folder, one subfolder per bundle
+(`CoreContent\`, `Human\`, `Abandoned\`, ...), converting as it goes. The asset
+type checklist controls which of these happen:
+- Textures → `.dds` and/or `.png`, independently selectable — DDS only, PNG
+  only (converts from DDS then deletes the DDS, unless conversion fails, in
+  which case the DDS is kept as a fallback), or both side by side. The PNG
+  conversion is via FFmpeg (needs `ffmpeg.exe` on `PATH` or next to the exe,
+  same as sound conversion), not Xenko's own PNG encoder, which turned out to
+  silently mis-decode at least some block-compressed textures and to crash
+  outright (unmanaged, uncatchable) on floating-point/HDR textures like BRDF
+  LUTs.
 - Sounds → `.wav`
 - Meshes → `.fbx` (same coverage/limitations as `dw2bm xm` — see above)
-- Everything else (shader source, XML/data files, ...) copied as-is, unconverted
+- Everything else / unsupported (shader source, XML/data files, ...) — copied
+  as-is, unconverted, under its own "misc/unsupported" checklist entry so you
+  can still see what's in a bundle even for types this tool doesn't convert
 
 Each bundle's subfolder contains exactly that bundle's *own* declared assets — no
 cross-bundle deduplication, and no attempt to resolve which version "wins" at
@@ -157,15 +161,15 @@ yourself. Same path appearing in multiple bundle subfolders is expected, not
 a bug.
 
 For scripting/testing, it also accepts the two paths as command-line arguments
-to skip the dialogs (and the bundle checklist — this form extracts everything):
-`dw2extract.exe "C:\...\Distant Worlds 2" "D:\output"`. A third argument limits
-the run to bundles whose name contains it (case-insensitive), e.g.
-`dw2extract.exe "C:\...\Distant Worlds 2" "D:\output" Human`.
+to skip the dialogs (and both checklists — this form extracts every bundle and
+every asset type): `dw2extract.exe "C:\...\Distant Worlds 2" "D:\output"`. A
+third argument limits the run to bundles whose name contains it
+(case-insensitive), e.g. `dw2extract.exe "C:\...\Distant Worlds 2" "D:\output" Human`.
 
-Heads up: a full-catalog extraction (all bundles selected) pulls around 30-40 GB
-from the game's bundles, and full conversion (especially mesh export) will take
-a while and use significant disk space. Use the bundle checklist to extract just
-what you need instead.
+Heads up: a full-catalog extraction (all bundles, all asset types selected)
+pulls around 30-40 GB from the game's bundles, and full conversion (especially
+mesh export) will take a while and use significant disk space. Use the bundle
+and asset-type checklists to extract just what you need instead.
 
 ## Not yet covered
 

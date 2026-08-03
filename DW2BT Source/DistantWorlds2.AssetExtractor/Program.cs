@@ -11,6 +11,27 @@ public static class Program
 {
     private const string VfsRoot = "/dw2install";
 
+    [Flags]
+    private enum AssetKindFlags
+    {
+        None = 0,
+        Dds = 1 << 0,
+        Png = 1 << 1,
+        Wav = 1 << 2,
+        Fbx = 1 << 3,
+        Misc = 1 << 4,
+        All = Dds | Png | Wav | Fbx | Misc,
+    }
+
+    private static readonly (string Label, AssetKindFlags Flag)[] AssetTypeOptions =
+    [
+        ("Textures - DDS (.dds)", AssetKindFlags.Dds),
+        ("Textures - PNG (.png, converted from DDS)", AssetKindFlags.Png),
+        ("Sounds (.wav)", AssetKindFlags.Wav),
+        ("Meshes (.fbx)", AssetKindFlags.Fbx),
+        ("Everything else / unsupported (copied as-is)", AssetKindFlags.Misc),
+    ];
+
     public static async Task<int> Main(string[] args)
     {
         AppDomain.CurrentDomain.AssemblyResolve += (_, resolveArgs) =>
@@ -87,6 +108,23 @@ public static class Program
             selectedBundles = picked;
         }
 
+        AssetKindFlags assetTypes;
+        if (!interactive)
+        {
+            // Scripted form: extract every supported asset type, no dialog.
+            assetTypes = AssetKindFlags.All;
+        }
+        else
+        {
+            var pickedTypes = PickAssetTypes();
+            if (pickedTypes is null or AssetKindFlags.None)
+            {
+                Console.WriteLine("Cancelled.");
+                return 1;
+            }
+            assetTypes = pickedTypes.Value;
+        }
+
         outputDir ??= PickFolder("Select where extracted assets should be saved");
         if (outputDir == null)
         {
@@ -98,9 +136,10 @@ public static class Program
         Console.WriteLine($"Install:  {installDir}");
         Console.WriteLine($"Output:   {outputDir}");
         Console.WriteLine($"Bundles:  {selectedBundles.Count} of {allBundles.Count} selected");
+        Console.WriteLine($"Types:    {string.Join(", ", AssetTypeOptions.Where(o => assetTypes.HasFlag(o.Flag)).Select(o => o.Label))}");
         Console.WriteLine();
 
-        return await Extract(installDir, outputDir, selectedBundles);
+        return await Extract(installDir, outputDir, selectedBundles, assetTypes);
     }
 
     private static string? PickFolder(string description)
@@ -180,7 +219,75 @@ public static class Program
         return result;
     }
 
-    private static async Task<int> Extract(string installDir, string outputDir, List<string> selectedBundles)
+    private static AssetKindFlags? PickAssetTypes()
+    {
+        AssetKindFlags? result = null;
+        var thread = new Thread(() =>
+        {
+            using var form = new Form
+            {
+                Text = "Select asset types to extract",
+                StartPosition = FormStartPosition.CenterScreen,
+                Width = 420,
+                Height = 300,
+                MinimizeBox = false,
+                MaximizeBox = false,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+            };
+
+            var listBox = new CheckedListBox
+            {
+                Left = 10,
+                Top = 10,
+                Width = 380,
+                Height = 180,
+                CheckOnClick = true,
+                IntegralHeight = false,
+            };
+            foreach (var (label, _) in AssetTypeOptions)
+                listBox.Items.Add(label, true);
+
+            var selectAllButton = new Button { Text = "Select All", Left = 10, Top = 200, Width = 90 };
+            selectAllButton.Click += (_, _) =>
+            {
+                for (int i = 0; i < listBox.Items.Count; i++)
+                    listBox.SetItemChecked(i, true);
+            };
+
+            var selectNoneButton = new Button { Text = "Select None", Left = 105, Top = 200, Width = 90 };
+            selectNoneButton.Click += (_, _) =>
+            {
+                for (int i = 0; i < listBox.Items.Count; i++)
+                    listBox.SetItemChecked(i, false);
+            };
+
+            var okButton = new Button { Text = "OK", Left = 220, Top = 200, Width = 80, DialogResult = DialogResult.OK };
+            var cancelButton = new Button { Text = "Cancel", Left = 305, Top = 200, Width = 85, DialogResult = DialogResult.Cancel };
+
+            form.Controls.Add(listBox);
+            form.Controls.Add(selectAllButton);
+            form.Controls.Add(selectNoneButton);
+            form.Controls.Add(okButton);
+            form.Controls.Add(cancelButton);
+            form.AcceptButton = okButton;
+            form.CancelButton = cancelButton;
+
+            if (form.ShowDialog() == DialogResult.OK)
+            {
+                var flags = AssetKindFlags.None;
+                for (int i = 0; i < AssetTypeOptions.Length; i++)
+                    if (listBox.GetItemChecked(i))
+                        flags |= AssetTypeOptions[i].Flag;
+                result = flags;
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return result;
+    }
+
+    private static async Task<int> Extract(string installDir, string outputDir, List<string> selectedBundles, AssetKindFlags assetTypes)
     {
         VirtualFileSystem.MountFileSystem(VfsRoot, installDir); // Xenko-side (bundle container plumbing)
         Stride.Core.IO.VirtualFileSystem.MountFileSystem(VfsRoot, installDir); // Stride-side (MeshExporter's ContentManager)
@@ -236,7 +343,7 @@ public static class Program
                     if (url.EndsWith("_Data", StringComparison.Ordinal) || url.EndsWith("/path", StringComparison.Ordinal))
                         continue; // companions, handled by their primary asset
 
-                    await ExtractOne(odb, fileProvider, bundleName, url, outputDir, stats);
+                    await ExtractOne(odb, fileProvider, bundleName, url, outputDir, assetTypes, stats);
                 }
             }
         }
@@ -246,7 +353,7 @@ public static class Program
         return 0;
     }
 
-    private static async Task ExtractOne(ObjectDatabase odb, DatabaseFileProvider fileProvider, string bundleName, string url, string outputDir, Stats stats)
+    private static async Task ExtractOne(ObjectDatabase odb, DatabaseFileProvider fileProvider, string bundleName, string url, string outputDir, AssetKindFlags assetTypes, Stats stats)
     {
         var destBase = Path.Combine(outputDir, bundleName, SanitizePath(url));
 
@@ -264,29 +371,48 @@ public static class Program
 
                 case DW2AssetKind.Texture:
                 {
+                    var wantDds = assetTypes.HasFlag(AssetKindFlags.Dds);
+                    var wantPng = assetTypes.HasFlag(AssetKindFlags.Png);
+                    if (!wantDds && !wantPng)
+                        return;
+
                     var rawPath = destBase + ".raw";
                     if (!await BundleExtractor.ExtractRaw(odb, fileProvider, url, rawPath))
                         throw new IOException("extract failed");
                     TextureConverter.XenkoToDds(rawPath, destBase + ".dds");
                     CleanupRaw(rawPath);
                     File.Delete(destBase + ".dds.refs");
-                    try
+
+                    var pngOk = false;
+                    if (wantPng)
                     {
-                        TextureConverter.DdsToPng(destBase + ".dds", destBase + ".png");
+                        try
+                        {
+                            TextureConverter.DdsToPng(destBase + ".dds", destBase + ".png");
+                            pngOk = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            // Some DDS variants (e.g. certain cubemap/array layouts) may not have a PNG-savable
+                            // path in Xenko's Image.Save — the .dds itself already succeeded, so don't fail the
+                            // whole asset over a missing PNG. Since PNG conversion failed, keep the .dds around
+                            // regardless of whether the user asked for it, so the asset isn't lost entirely.
+                            Console.Error.WriteLine($"  (no PNG for {url}: {ex.Message})");
+                        }
                     }
-                    catch (Exception ex)
-                    {
-                        // Some DDS variants (e.g. certain cubemap/array layouts) may not have a PNG-savable
-                        // path in Xenko's Image.Save — the .dds itself already succeeded, so don't fail the
-                        // whole asset over a missing PNG.
-                        Console.Error.WriteLine($"  (no PNG for {url}: {ex.Message})");
-                    }
+
+                    if (!wantDds && pngOk)
+                        File.Delete(destBase + ".dds");
+
                     stats.Textures++;
                     break;
                 }
 
                 case DW2AssetKind.Sound:
                 {
+                    if (!assetTypes.HasFlag(AssetKindFlags.Wav))
+                        return;
+
                     var rawPath = destBase + ".raw";
                     if (!await BundleExtractor.ExtractRaw(odb, fileProvider, url, rawPath))
                         throw new IOException("extract failed");
@@ -297,12 +423,16 @@ public static class Program
                 }
 
                 case DW2AssetKind.Model:
+                    if (!assetTypes.HasFlag(AssetKindFlags.Fbx))
+                        return;
                     await MeshExporter.ExportToFbx(bundleName, url, destBase + ".fbx", VfsRoot);
                     stats.Meshes++;
                     break;
 
                 case DW2AssetKind.RawOrUnknown:
                 default:
+                    if (!assetTypes.HasFlag(AssetKindFlags.Misc))
+                        return;
                     if (!await BundleExtractor.ExtractRaw(odb, fileProvider, url, destBase))
                         throw new IOException("extract failed");
                     stats.Raw++;
