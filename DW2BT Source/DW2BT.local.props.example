@@ -1,0 +1,14 @@
+<Project>
+    <!--
+        Copy this file to DW2BT.local.props (same folder) and point DW2GameDir at
+        your own Distant Worlds 2 install. DW2BT.local.props is gitignored — it's
+        machine-specific and must never be committed.
+
+        The build needs the *real* Xenko/Stride runtime DLLs from a licensed DW2
+        install to compile and run against. It cannot ship them itself (they're
+        Slitherine/Matrix Games' property, not this project's).
+    -->
+    <PropertyGroup>
+        <DW2GameDir>C:\Steam\steamapps\common\Distant Worlds 2</DW2GameDir>
+    </PropertyGroup>
+</Project>

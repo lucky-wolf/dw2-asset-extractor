@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <Import Project="..\DW2BT.Common.props" />
+
+    <PropertyGroup>
+        <RootNamespace>DistantWorlds2.Core</RootNamespace>
+        <OutputType>Library</OutputType>
+        <PackageId>DistantWorlds2.Core</PackageId>
+        <Product>DW2BT Shared Asset Conversion</Product>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="FFMpegCore" Version="4.8.0" />
+    </ItemGroup>
+
+</Project>

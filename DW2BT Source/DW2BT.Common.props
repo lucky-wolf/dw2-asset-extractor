@@ -1,0 +1,276 @@
+<Project>
+    <!--
+        Shared engine-linking setup for every project in this repo (the dw2bm CLI, the
+        DistantWorlds2.Core conversion library, the asset extractor, ...). Import this
+        instead of duplicating the reference list per-project:
+
+            <Import Project="..\DW2BT.Common.props" />
+
+        This tool links directly against the real Xenko/Stride runtime DLLs shipped
+        inside an actual Distant Worlds 2 install (see DW2BT.local.props.example).
+        They can't be committed to this repo or restored via NuGet — they're
+        Slitherine/Matrix Games' property, not a redistributable SDK. The reference-
+        assembly stubs under ref/ were an earlier attempt at decoupling compile-time
+        references from a real install; they only contain public metadata and can't
+        be loaded at runtime, and the game's actual asset types (Model, Sound,
+        Texture, ...) are Stride-namespaced, not Xenko-namespaced, so the stubs are
+        also out of date. They're left in place for reference but are no longer used.
+    -->
+    <Import Project="$(MSBuildThisFileDirectory)DW2BT.local.props" Condition="Exists('$(MSBuildThisFileDirectory)DW2BT.local.props')" />
+
+    <PropertyGroup>
+        <TargetFramework>net8.0-windows</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <Authors>Distant Worlds 2 Modification Community</Authors>
+        <Company>Distant Worlds 2 Modification Community</Company>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <DW2BTMissingGameDirMessage>DW2GameDir is not set. Copy DW2BT.local.props.example to DW2BT.local.props (next to DW2BT.Common.props) and point DW2GameDir at your Distant Worlds 2 install.</DW2BTMissingGameDirMessage>
+    </PropertyGroup>
+    <Target Name="DW2BTCheckGameDir" BeforeTargets="ResolveAssemblyReferences;BeforeBuild">
+        <Error Condition="'$(DW2GameDir)' == ''" Text="$(DW2BTMissingGameDirMessage)" />
+        <Error Condition="'$(DW2GameDir)' != '' And !Exists('$(DW2GameDir)\DistantWorlds2.exe')" Text="DW2GameDir ('$(DW2GameDir)') does not look like a Distant Worlds 2 install (DistantWorlds2.exe not found there)." />
+    </Target>
+
+    <ItemGroup Condition="'$(DW2GameDir)' != ''">
+        <!-- Low-level bundle/container plumbing (Xenko-namespaced; verified byte-compatible with real DW2 bundles) -->
+        <Reference Include="Xenko.Core">
+            <HintPath>$(DW2GameDir)\Xenko.Core.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Core.IO">
+            <HintPath>$(DW2GameDir)\Xenko.Core.IO.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Core.Mathematics">
+            <HintPath>$(DW2GameDir)\Xenko.Core.Mathematics.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Core.MicroThreading">
+            <HintPath>$(DW2GameDir)\Xenko.Core.MicroThreading.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Core.Serialization">
+            <HintPath>$(DW2GameDir)\Xenko.Core.Serialization.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Core.Shaders">
+            <HintPath>$(DW2GameDir)\Xenko.Core.Shaders.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko">
+            <HintPath>$(DW2GameDir)\Xenko.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Native">
+            <HintPath>$(DW2GameDir)\Xenko.Native.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Engine">
+            <HintPath>$(DW2GameDir)\Xenko.Engine.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Games">
+            <HintPath>$(DW2GameDir)\Xenko.Games.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Graphics">
+            <HintPath>$(DW2GameDir)\Xenko.Graphics.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Audio">
+            <HintPath>$(DW2GameDir)\Xenko.Audio.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Input">
+            <HintPath>$(DW2GameDir)\Xenko.Input.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Particles">
+            <HintPath>$(DW2GameDir)\Xenko.Particles.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Physics">
+            <HintPath>$(DW2GameDir)\Xenko.Physics.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Rendering">
+            <HintPath>$(DW2GameDir)\Xenko.Rendering.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Shaders">
+            <HintPath>$(DW2GameDir)\Xenko.Shaders.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Shaders.Compiler">
+            <HintPath>$(DW2GameDir)\Xenko.Shaders.Compiler.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Shaders.Parser">
+            <HintPath>$(DW2GameDir)\Xenko.Shaders.Parser.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.UI">
+            <HintPath>$(DW2GameDir)\Xenko.UI.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Video">
+            <HintPath>$(DW2GameDir)\Xenko.Video.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.VirtualReality">
+            <HintPath>$(DW2GameDir)\Xenko.VirtualReality.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Navigation">
+            <HintPath>$(DW2GameDir)\Xenko.Navigation.dll</HintPath>
+        </Reference>
+        <Reference Include="Xenko.Irony">
+            <HintPath>$(DW2GameDir)\Xenko.Irony.dll</HintPath>
+        </Reference>
+
+        <!-- Native graphics/audio interop that Xenko.* touches during static init -->
+        <Reference Include="SharpDX">
+            <HintPath>$(DW2GameDir)\SharpDX.dll</HintPath>
+        </Reference>
+        <Reference Include="SharpDX.D3DCompiler">
+            <HintPath>$(DW2GameDir)\SharpDX.D3DCompiler.dll</HintPath>
+        </Reference>
+        <Reference Include="SharpDX.Direct3D11">
+            <HintPath>$(DW2GameDir)\SharpDX.Direct3D11.dll</HintPath>
+        </Reference>
+        <Reference Include="SharpDX.Direct3D12">
+            <HintPath>$(DW2GameDir)\SharpDX.Direct3D12.dll</HintPath>
+        </Reference>
+        <Reference Include="SharpDX.Direct3D9">
+            <HintPath>$(DW2GameDir)\SharpDX.Direct3D9.dll</HintPath>
+        </Reference>
+        <Reference Include="SharpDX.DirectInput">
+            <HintPath>$(DW2GameDir)\SharpDX.DirectInput.dll</HintPath>
+        </Reference>
+        <Reference Include="SharpDX.DXGI">
+            <HintPath>$(DW2GameDir)\SharpDX.DXGI.dll</HintPath>
+        </Reference>
+        <Reference Include="SharpDX.Mathematics">
+            <HintPath>$(DW2GameDir)\SharpDX.Mathematics.dll</HintPath>
+        </Reference>
+        <Reference Include="SharpDX.MediaFoundation">
+            <HintPath>$(DW2GameDir)\SharpDX.MediaFoundation.dll</HintPath>
+        </Reference>
+        <Reference Include="SharpDX.RawInput">
+            <HintPath>$(DW2GameDir)\SharpDX.RawInput.dll</HintPath>
+        </Reference>
+        <Reference Include="SharpDX.XInput">
+            <HintPath>$(DW2GameDir)\SharpDX.XInput.dll</HintPath>
+        </Reference>
+        <Reference Include="SharpFont">
+            <HintPath>$(DW2GameDir)\SharpFont.dll</HintPath>
+        </Reference>
+        <Reference Include="BulletSharp.NetStandard">
+            <HintPath>$(DW2GameDir)\BulletSharp.NetStandard.dll</HintPath>
+        </Reference>
+        <Reference Include="CppNet">
+            <HintPath>$(DW2GameDir)\CppNet.dll</HintPath>
+        </Reference>
+        <Reference Include="OpenTK">
+            <HintPath>$(DW2GameDir)\OpenTK.dll</HintPath>
+        </Reference>
+        <Reference Include="SDL2-CS">
+            <HintPath>$(DW2GameDir)\SDL2-CS.dll</HintPath>
+        </Reference>
+        <Reference Include="Facepunch.Steamworks.Win64">
+            <HintPath>$(DW2GameDir)\Facepunch.Steamworks.Win64.dll</HintPath>
+        </Reference>
+
+        <!-- Real Stride assemblies: DW2's actual content types (Model, Sound, Texture, ...) are Stride-namespaced -->
+        <Reference Include="Stride.Core">
+            <HintPath>$(DW2GameDir)\Stride.Core.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Core.IO">
+            <HintPath>$(DW2GameDir)\Stride.Core.IO.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Core.Mathematics">
+            <HintPath>$(DW2GameDir)\Stride.Core.Mathematics.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Core.MicroThreading">
+            <HintPath>$(DW2GameDir)\Stride.Core.MicroThreading.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Core.Serialization">
+            <HintPath>$(DW2GameDir)\Stride.Core.Serialization.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Rendering">
+            <HintPath>$(DW2GameDir)\Stride.Rendering.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Graphics">
+            <HintPath>$(DW2GameDir)\Stride.Graphics.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Engine">
+            <HintPath>$(DW2GameDir)\Stride.Engine.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Audio">
+            <HintPath>$(DW2GameDir)\Stride.Audio.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride">
+            <HintPath>$(DW2GameDir)\Stride.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Native">
+            <HintPath>$(DW2GameDir)\Stride.Native.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Games">
+            <HintPath>$(DW2GameDir)\Stride.Games.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Input">
+            <HintPath>$(DW2GameDir)\Stride.Input.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Particles">
+            <HintPath>$(DW2GameDir)\Stride.Particles.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Physics">
+            <HintPath>$(DW2GameDir)\Stride.Physics.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.UI">
+            <HintPath>$(DW2GameDir)\Stride.UI.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Video">
+            <HintPath>$(DW2GameDir)\Stride.Video.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Navigation">
+            <HintPath>$(DW2GameDir)\Stride.Navigation.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.VirtualReality">
+            <HintPath>$(DW2GameDir)\Stride.VirtualReality.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Core.Shaders">
+            <HintPath>$(DW2GameDir)\Stride.Core.Shaders.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Shaders">
+            <HintPath>$(DW2GameDir)\Stride.Shaders.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Shaders.Compiler">
+            <HintPath>$(DW2GameDir)\Stride.Shaders.Compiler.dll</HintPath>
+        </Reference>
+        <Reference Include="Stride.Shaders.Parser">
+            <HintPath>$(DW2GameDir)\Stride.Shaders.Parser.dll</HintPath>
+        </Reference>
+
+        <!-- Transitive deps of the Stride assemblies above, not otherwise referenced -->
+        <Reference Include="ServiceWire">
+            <HintPath>$(DW2GameDir)\ServiceWire.dll</HintPath>
+        </Reference>
+        <Reference Include="K4os.Compression.LZ4">
+            <HintPath>$(DW2GameDir)\K4os.Compression.LZ4.dll</HintPath>
+        </Reference>
+        <Reference Include="K4os.Compression.LZ4.Legacy">
+            <HintPath>$(DW2GameDir)\K4os.Compression.LZ4.Legacy.dll</HintPath>
+        </Reference>
+
+        <!-- DW2's own assemblies, needed transitively by some Xenko types -->
+        <Reference Include="DistantWorlds.Types">
+            <HintPath>$(DW2GameDir)\DistantWorlds.Types.dll</HintPath>
+        </Reference>
+        <Reference Include="DistantWorlds.UI">
+            <HintPath>$(DW2GameDir)\DistantWorlds.UI.dll</HintPath>
+        </Reference>
+        <Reference Include="DistantWorlds2">
+            <HintPath>$(DW2GameDir)\DistantWorlds2.dll</HintPath>
+        </Reference>
+    </ItemGroup>
+
+    <!--
+        Native libs that the managed assemblies above P/Invoke into during static init.
+        Xenko's live in x64\, Stride's own (stride-core.dll etc.) live in win-x64\ instead
+        — both get flattened into one x64\ folder next to the exe since that's the one
+        directory Xenko.Core.NativeLibrary/Stride.Core.NativeLibraryHelper both probe.
+        Only meaningful for executable projects (class libraries have no OutDir/PublishDir
+        anyone runs from), but harmless to include unconditionally.
+    -->
+    <ItemGroup Condition="'$(DW2GameDir)' != ''">
+        <DW2BTNativeLibs Include="$(DW2GameDir)\x64\*.dll" />
+        <DW2BTNativeLibs Include="$(DW2GameDir)\win-x64\*.dll" />
+    </ItemGroup>
+    <Target Name="DW2BTCopyNativeLibs" AfterTargets="Build;Publish">
+        <Copy SourceFiles="@(DW2BTNativeLibs)" DestinationFolder="$(OutDir)x64" SkipUnchangedFiles="true" Condition="'$(OutDir)' != '' And '$(OutputType)' == 'Exe'" />
+        <Copy SourceFiles="@(DW2BTNativeLibs)" DestinationFolder="$(PublishDir)x64" SkipUnchangedFiles="true" Condition="'$(PublishDir)' != '' And '$(OutputType)' == 'Exe'" />
+    </Target>
+</Project>

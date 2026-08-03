@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <Import Project="..\DW2BT.Common.props" />
+
+    <PropertyGroup>
+        <AssemblyName>dw2extract</AssemblyName>
+        <RootNamespace>DistantWorlds2.AssetExtractor</RootNamespace>
+        <OutputType>Exe</OutputType>
+        <PackageId>DistantWorlds2.AssetExtractor</PackageId>
+        <Product>Distant Worlds 2 Asset Extractor</Product>
+        <UseWindowsForms>true</UseWindowsForms>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\DistantWorlds2.Core\DistantWorlds2.Core.csproj" />
+    </ItemGroup>
+
+</Project>
