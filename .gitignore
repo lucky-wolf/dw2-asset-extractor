@@ -18,6 +18,12 @@ DW2BT.local.props
 .vs/
 *.user
 
+# Published build output — bundles the real Xenko/Stride/DistantWorlds2 engine
+# DLLs alongside dw2extract.exe, which can't be redistributed (Slitherine/Matrix
+# IP, not a redistributable SDK). Build it yourself via `dotnet publish` per
+# DW2BT Source/README.md.
+/dw2extract/
+
 # Claude Code project context — internal dev notes, not for public/user consumption
 /CLAUDE.md
 /.claude/

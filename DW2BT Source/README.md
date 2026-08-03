@@ -16,6 +16,12 @@ Two projects:
 
 ## One-time setup
 
+Prerequisites: Windows 10/11, a legitimately owned Distant Worlds 2 install
+(Steam or GOG), the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0),
+and [FFmpeg](https://ffmpeg.org/download.html) (`ffmpeg.exe`/`ffprobe.exe`, for
+sound and PNG conversion — step 3 below). See the root `README.md`'s
+"Before you start" section for why each of these is needed.
+
 1. **Point the build at your DW2 install.** The real Xenko/Stride engine DLLs
    this tool links against ship with the game itself — they can't be bundled
    with this repo (they're Slitherine/Matrix Games' property, not a

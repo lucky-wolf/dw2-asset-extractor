@@ -10,9 +10,34 @@ source and anything else copied as-is.
 **Extraction/conversion only** — this tool does not repackage bundles or insert
 anything back into the game.
 
-See [`DW2BT Source/README.md`](DW2BT%20Source/README.md) for build setup and
-full usage instructions. A ready-to-run published build lives in
-[`dw2extract/`](dw2extract/).
+There's no downloadable build here — `dw2extract.exe` links directly against
+the real Xenko/Stride/DistantWorlds2 engine DLLs from your own DW2 install,
+which are Slitherine/Matrix Games' property and can't be redistributed. Every
+user builds their own copy (a couple of `dotnet` commands, no Visual Studio
+required) against their own install. Full walkthrough:
+[`DW2BT Source/README.md`](DW2BT%20Source/README.md).
+
+## Before you start
+
+You'll need, before the build/run steps in that walkthrough will work:
+
+- **Windows 10/11.** This tool doesn't run cross-platform — it targets
+  `net8.0-windows` and links against Windows-only native libraries (Direct3D,
+  the engine's own native DLLs, etc.).
+- **Distant Worlds 2 installed** (Steam or GOG), and legitimately owned. This
+  is required twice over: the *build* links against the engine DLLs sitting in
+  your install folder, and the *tool itself* reads bundles from an install
+  folder you point it at when it runs. You do **not** need to separately
+  install Stride or Xenko (the engine DW2 is built on) — those DLLs already
+  ship inside your DW2 install; nothing else to fetch there.
+- **[.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)** — needed
+  to build. The `dotnet` command-line tool that ships with it is all the
+  walkthrough uses; an IDE (Visual Studio, Rider, ...) is optional.
+- **[FFmpeg](https://ffmpeg.org/download.html)** (`ffmpeg.exe` + `ffprobe.exe`)
+  — needed for sound conversion and DDS→PNG conversion specifically. Without
+  it, texture extraction still works (you just won't get `.png`, only `.dds`),
+  but sound extraction fails outright. Put both on your `PATH`, or copy them
+  next to the built `dw2extract.exe`.
 
 ## Origin
 
