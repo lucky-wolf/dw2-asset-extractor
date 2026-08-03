@@ -126,9 +126,11 @@ raw text in the bundle, not compiled bytecode, so no conversion step is needed.
 ## Asset Extractor
 
 `dw2extract.exe` needs no setup beyond the build steps above — run it and it asks
-(via folder-browse dialogs) for your DW2 install folder, then where to save
-extracted assets. It doesn't need the `data\db\bundles` junction `dw2bm` does: it
-mounts whatever install folder you pick at runtime.
+(via folder-browse dialogs) for your DW2 install folder, then which bundles to
+extract (a checklist, all checked by default — use Select All/Select None to
+speed up picking just one or two), then where to save extracted assets. It
+doesn't need the `data\db\bundles` junction `dw2bm` does: it mounts whatever
+install folder you pick at runtime.
 
 It then walks every bundle and recreates the game's own folder structure under
 your chosen output folder, one subfolder per bundle (`CoreContent\`, `Human\`,
@@ -155,11 +157,15 @@ yourself. Same path appearing in multiple bundle subfolders is expected, not
 a bug.
 
 For scripting/testing, it also accepts the two paths as command-line arguments
-to skip the dialogs: `dw2extract.exe "C:\...\Distant Worlds 2" "D:\output"`.
+to skip the dialogs (and the bundle checklist — this form extracts everything):
+`dw2extract.exe "C:\...\Distant Worlds 2" "D:\output"`. A third argument limits
+the run to bundles whose name contains it (case-insensitive), e.g.
+`dw2extract.exe "C:\...\Distant Worlds 2" "D:\output" Human`.
 
-Heads up: this is a full-catalog extraction — the game's bundles total around
-30-40 GB, and full conversion (especially mesh export) will take a while and use
-significant disk space. There's no per-bundle filtering yet; it's all-or-nothing.
+Heads up: a full-catalog extraction (all bundles selected) pulls around 30-40 GB
+from the game's bundles, and full conversion (especially mesh export) will take
+a while and use significant disk space. Use the bundle checklist to extract just
+what you need instead.
 
 ## Not yet covered
 

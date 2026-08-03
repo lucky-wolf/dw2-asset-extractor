@@ -32,6 +32,8 @@ public static class Program
         string? outputDir = args.Length is 2 or 3 ? args[1] : null;
         string? bundleFilter = args.Length == 3 ? args[2] : null;
 
+        bool interactive = installDir == null;
+
         installDir ??= PickFolder("Select your Distant Worlds 2 install folder (contains DistantWorlds2.exe)");
         if (installDir == null)
         {
@@ -44,6 +46,47 @@ public static class Program
             return 1;
         }
 
+        var bundlesDir = Path.Combine(installDir, "data", "db", "bundles");
+        if (!Directory.Exists(bundlesDir))
+        {
+            Console.Error.WriteLine($"No bundles found at '{bundlesDir}'.");
+            return 1;
+        }
+
+        var allBundles = BundleCatalog.ListBundleNames(bundlesDir).OrderBy(b => b, StringComparer.OrdinalIgnoreCase).ToList();
+        if (allBundles.Count == 0)
+        {
+            Console.Error.WriteLine($"No bundles found at '{bundlesDir}'.");
+            return 1;
+        }
+
+        List<string> selectedBundles;
+        if (bundleFilter != null)
+        {
+            // Scripted form: substring filter, no dialog.
+            selectedBundles = allBundles.Where(b => b.Contains(bundleFilter, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (selectedBundles.Count == 0)
+            {
+                Console.Error.WriteLine($"No bundles match filter '{bundleFilter}'.");
+                return 1;
+            }
+        }
+        else if (!interactive)
+        {
+            // Scripted form with no filter: extract everything, no dialog.
+            selectedBundles = allBundles;
+        }
+        else
+        {
+            var picked = PickBundles(allBundles);
+            if (picked == null || picked.Count == 0)
+            {
+                Console.WriteLine("Cancelled.");
+                return 1;
+            }
+            selectedBundles = picked;
+        }
+
         outputDir ??= PickFolder("Select where extracted assets should be saved");
         if (outputDir == null)
         {
@@ -54,9 +97,10 @@ public static class Program
         Console.WriteLine();
         Console.WriteLine($"Install:  {installDir}");
         Console.WriteLine($"Output:   {outputDir}");
+        Console.WriteLine($"Bundles:  {selectedBundles.Count} of {allBundles.Count} selected");
         Console.WriteLine();
 
-        return await Extract(installDir, outputDir, bundleFilter);
+        return await Extract(installDir, outputDir, selectedBundles);
     }
 
     private static string? PickFolder(string description)
@@ -74,17 +118,72 @@ public static class Program
         return result;
     }
 
-    private static async Task<int> Extract(string installDir, string outputDir, string? bundleFilter = null)
+    private static List<string>? PickBundles(List<string> allBundles)
+    {
+        List<string>? result = null;
+        var thread = new Thread(() =>
+        {
+            using var form = new Form
+            {
+                Text = "Select bundles to extract",
+                StartPosition = FormStartPosition.CenterScreen,
+                Width = 420,
+                Height = 520,
+                MinimizeBox = false,
+                MaximizeBox = false,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+            };
+
+            var listBox = new CheckedListBox
+            {
+                Left = 10,
+                Top = 10,
+                Width = 380,
+                Height = 400,
+                CheckOnClick = true,
+                IntegralHeight = false,
+            };
+            foreach (var bundleName in allBundles)
+                listBox.Items.Add(bundleName, true);
+
+            var selectAllButton = new Button { Text = "Select All", Left = 10, Top = 420, Width = 90 };
+            selectAllButton.Click += (_, _) =>
+            {
+                for (int i = 0; i < listBox.Items.Count; i++)
+                    listBox.SetItemChecked(i, true);
+            };
+
+            var selectNoneButton = new Button { Text = "Select None", Left = 105, Top = 420, Width = 90 };
+            selectNoneButton.Click += (_, _) =>
+            {
+                for (int i = 0; i < listBox.Items.Count; i++)
+                    listBox.SetItemChecked(i, false);
+            };
+
+            var okButton = new Button { Text = "OK", Left = 220, Top = 420, Width = 80, DialogResult = DialogResult.OK };
+            var cancelButton = new Button { Text = "Cancel", Left = 305, Top = 420, Width = 85, DialogResult = DialogResult.Cancel };
+
+            form.Controls.Add(listBox);
+            form.Controls.Add(selectAllButton);
+            form.Controls.Add(selectNoneButton);
+            form.Controls.Add(okButton);
+            form.Controls.Add(cancelButton);
+            form.AcceptButton = okButton;
+            form.CancelButton = cancelButton;
+
+            if (form.ShowDialog() == DialogResult.OK)
+                result = listBox.CheckedItems.Cast<string>().ToList();
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return result;
+    }
+
+    private static async Task<int> Extract(string installDir, string outputDir, List<string> selectedBundles)
     {
         VirtualFileSystem.MountFileSystem(VfsRoot, installDir); // Xenko-side (bundle container plumbing)
         Stride.Core.IO.VirtualFileSystem.MountFileSystem(VfsRoot, installDir); // Stride-side (MeshExporter's ContentManager)
-
-        var bundlesDir = Path.Combine(installDir, "data", "db", "bundles");
-        if (!Directory.Exists(bundlesDir))
-        {
-            Console.Error.WriteLine($"No bundles found at '{bundlesDir}'.");
-            return 1;
-        }
 
         // DW2 routinely lets a later-loaded bundle re-declare (override) an asset path that an earlier
         // one also declares — e.g. CoreContent and Human can both have their own "Ships/Human/..." entry,
@@ -94,12 +193,9 @@ public static class Program
         // own file says it contains, with no dependency-merging) goes into its own subfolder, full stop.
         // No cross-bundle deduplication: the same path can legitimately appear once per bundle that
         // declares it.
-        var allBundles = BundleCatalog.ListBundleNames(bundlesDir).ToList();
-        if (bundleFilter != null)
-            allBundles = allBundles.Where(b => b.Contains(bundleFilter, StringComparison.OrdinalIgnoreCase)).ToList();
         var stats = new Stats();
 
-        foreach (var bundleName in allBundles)
+        foreach (var bundleName in selectedBundles)
         {
             Console.WriteLine($"=== {bundleName} ===");
 

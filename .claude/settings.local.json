@@ -102,7 +102,9 @@
       "Bash(powershell -NoProfile -Command \"Get-Process dw2extract -ErrorAction SilentlyContinue | Stop-Process -Force\")",
       "Bash(rm -rf __TRACKED_VAR__/cwd-mismatch-test __TRACKED_VAR__/cwd-mismatch-output __TRACKED_VAR__/sound-test-output)",
       "Bash(./dw2extract.exe /c/Users/Joshua/AppData/Local/Temp/claude/D---GAME-MODDING-DW2-Modding-DW2-Bundle-Tool/567878d4-9c33-4fe1-9475-04639666842b/scratchpad/mini-install /c/Users/Joshua/AppData/Local/Temp/claude/D---GAME-MODDING-DW2-Modding-DW2-Bundle-Tool/567878d4-9c33-4fe1-9475-04639666842b/scratchpad/proof-output CoreContent)",
-      "Bash(rm -rf \"/c/Users/Joshua/AppData/Local/Temp/claude/D---GAME-MODDING-DW2-Modding-DW2-Bundle-Tool/567878d4-9c33-4fe1-9475-04639666842b/scratchpad/proof-output\" *)"
+      "Bash(rm -rf \"/c/Users/Joshua/AppData/Local/Temp/claude/D---GAME-MODDING-DW2-Modding-DW2-Bundle-Tool/567878d4-9c33-4fe1-9475-04639666842b/scratchpad/proof-output\" *)",
+      "Bash(grep -c \".bundle$\")",
+      "Bash(grep -E \"^[^.]+\\\\.bundle$\")"
     ]
   }
 }
