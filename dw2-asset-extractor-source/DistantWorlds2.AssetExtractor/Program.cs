@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using System.Windows.Forms;
 using DistantWorlds2.Core;
@@ -10,6 +11,7 @@ namespace DistantWorlds2.AssetExtractor;
 public static class Program
 {
     private const string VfsRoot = "/dw2install";
+    private const int BundleProgressLogInterval = 250;
 
     [Flags]
     private enum AssetKindFlags
@@ -34,140 +36,208 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
-        AppDomain.CurrentDomain.AssemblyResolve += (_, resolveArgs) =>
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+
+        RunLogger.Initialize(ResolveLogPath());
+
+        try
         {
-            var path = Path.Combine(AppContext.BaseDirectory, new AssemblyName(resolveArgs.Name).Name + ".dll");
-            return File.Exists(path) ? Assembly.LoadFrom(path) : null;
+            AppDomain.CurrentDomain.AssemblyResolve += (_, resolveArgs) =>
+            {
+                var path = Path.Combine(AppContext.BaseDirectory, new AssemblyName(resolveArgs.Name).Name + ".dll");
+                return File.Exists(path) ? Assembly.LoadFrom(path) : null;
+            };
+
+            RunLogger.Info("Distant Worlds 2 Asset Extractor");
+            RunLogger.Info("Extracts and converts every asset from every bundle: textures -> .dds, sounds -> .wav,");
+            RunLogger.Info("meshes -> .fbx, everything else copied as-is (shader source, data files, ...).");
+            RunLogger.Info(string.Empty);
+
+            var options = ParseArgs(args);
+            string? installDir = options.InstallDir;
+            string? outputDir = options.OutputDir;
+            string? bundleFilter = options.BundleFilter;
+
+            var settings = UserSettings.Load();
+            TextureConverter.SetFfmpegTimeoutSeconds(settings.GetTextureFfmpegTimeoutSeconds());
+            SoundConverter.SetFfmpegTimeoutSeconds(settings.GetSoundFfmpegTimeoutSeconds());
+            var maxParallelBundles = options.MaxParallelBundles ?? settings.GetMaxParallelBundles();
+            var verbose = options.Verbose;
+
+            bool interactive = installDir == null;
+
+            if (installDir == null)
+            {
+                var savedInstallDir = settings.InstallDir;
+                if (savedInstallDir != null && !File.Exists(Path.Combine(savedInstallDir, "DistantWorlds2.exe")))
+                    savedInstallDir = null; // no longer a valid DW2 install, don't offer to reuse it
+
+                installDir = ConfirmOrPickFolder(savedInstallDir,
+                    "Use your previously selected Distant Worlds 2 install folder?",
+                    "Select your Distant Worlds 2 install folder (contains DistantWorlds2.exe)");
+            }
+            if (installDir == null)
+            {
+                RunLogger.Info("Cancelled.");
+                return 1;
+            }
+            if (!File.Exists(Path.Combine(installDir, "DistantWorlds2.exe")))
+            {
+                RunLogger.Error($"'{installDir}' doesn't look like a Distant Worlds 2 install (DistantWorlds2.exe not found there).");
+                return 1;
+            }
+
+            if (outputDir == null)
+            {
+                outputDir = ConfirmOrPickFolder(settings.OutputDir,
+                    "Use your previously selected output folder?",
+                    "Select where extracted assets should be saved");
+            }
+            if (outputDir == null)
+            {
+                RunLogger.Info("Cancelled.");
+                return 1;
+            }
+
+            var bundlesDir = Path.Combine(installDir, "data", "db", "bundles");
+            if (!Directory.Exists(bundlesDir))
+            {
+                RunLogger.Error($"No bundles found at '{bundlesDir}'.");
+                return 1;
+            }
+
+            var allBundles = BundleCatalog.ListBundleNames(bundlesDir).OrderBy(b => b, StringComparer.OrdinalIgnoreCase).ToList();
+            if (allBundles.Count == 0)
+            {
+                RunLogger.Error($"No bundles found at '{bundlesDir}'.");
+                return 1;
+            }
+
+            List<string> selectedBundles;
+            if (bundleFilter != null)
+            {
+                selectedBundles = allBundles.Where(b => b.Contains(bundleFilter, StringComparison.OrdinalIgnoreCase)).ToList();
+                if (selectedBundles.Count == 0)
+                {
+                    RunLogger.Error($"No bundles match filter '{bundleFilter}'.");
+                    return 1;
+                }
+            }
+            else if (!interactive)
+            {
+                selectedBundles = allBundles;
+            }
+            else
+            {
+                var picked = PickBundles(allBundles);
+                if (picked == null || picked.Count == 0)
+                {
+                    RunLogger.Info("Cancelled.");
+                    return 1;
+                }
+                selectedBundles = picked;
+            }
+
+            AssetKindFlags assetTypes;
+            if (!interactive)
+            {
+                assetTypes = AssetKindFlags.All;
+            }
+            else
+            {
+                var pickedTypes = PickAssetTypes();
+                if (pickedTypes is null or AssetKindFlags.None)
+                {
+                    RunLogger.Info("Cancelled.");
+                    return 1;
+                }
+                assetTypes = pickedTypes.Value;
+            }
+
+            if (assetTypes.HasFlag(AssetKindFlags.Fbx))
+                assetTypes |= AssetKindFlags.Png;
+
+            if (interactive)
+            {
+                settings.InstallDir = installDir;
+                settings.OutputDir = outputDir;
+                settings.Save();
+            }
+
+            RunLogger.Info(string.Empty);
+            RunLogger.Info($"Install:   {installDir}");
+            RunLogger.Info($"Output:    {outputDir}");
+            RunLogger.Info($"Bundles:   {selectedBundles.Count} of {allBundles.Count} selected");
+            RunLogger.Info($"Types:     {string.Join(", ", AssetTypeOptions.Where(o => assetTypes.HasFlag(o.Flag)).Select(o => o.Label))}");
+            RunLogger.Info($"Parallel:  {maxParallelBundles} bundle worker(s)");
+            if (verbose)
+                RunLogger.Info("Verbose:   enabled");
+            RunLogger.Info(string.Empty);
+
+            return await Extract(installDir, outputDir, selectedBundles, assetTypes, maxParallelBundles, verbose);
+        }
+        finally
+        {
+            RunLogger.Dispose();
+        }
+    }
+
+    private sealed class CommandLineOptions
+    {
+        public string? InstallDir { get; init; }
+        public string? OutputDir { get; init; }
+        public string? BundleFilter { get; init; }
+        public int? MaxParallelBundles { get; init; }
+        public bool Verbose { get; init; }
+    }
+
+    private static CommandLineOptions ParseArgs(string[] args)
+    {
+        var positional = new List<string>();
+        int? maxParallelBundles = null;
+        var verbose = false;
+
+        for (var i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (arg is "-j" or "--jobs" or "--max-parallelism" or "--max-parallel-bundles")
+            {
+                if (i + 1 >= args.Length || !int.TryParse(args[++i], out var parsed) || parsed <= 0)
+                    throw new ArgumentException($"{arg} requires a positive integer value.");
+                maxParallelBundles = parsed;
+                continue;
+            }
+
+            if (arg is "-v" or "--verbose")
+            {
+                verbose = true;
+                continue;
+            }
+
+            positional.Add(arg);
+        }
+
+        if (positional.Count != 0 && positional.Count != 2 && positional.Count != 3)
+            throw new ArgumentException("Usage: dw2extract.exe [<installDir> <outputDir> [bundleNameFilter]] [-j <count>] [-v]");
+
+        return new CommandLineOptions
+        {
+            InstallDir = positional.Count >= 2 ? positional[0] : null,
+            OutputDir = positional.Count >= 2 ? positional[1] : null,
+            BundleFilter = positional.Count == 3 ? positional[2] : null,
+            MaxParallelBundles = maxParallelBundles,
+            Verbose = verbose,
         };
+    }
 
-        Console.WriteLine("Distant Worlds 2 Asset Extractor");
-        Console.WriteLine("Extracts and converts every asset from every bundle: textures -> .dds, sounds -> .wav,");
-        Console.WriteLine("meshes -> .fbx, everything else copied as-is (shader source, data files, ...).");
-        Console.WriteLine();
-
-        // Optional non-interactive form (dw2extract.exe <installDir> <outputDir> [bundleNameFilter]) for
-        // scripting/testing; with no arguments it falls back to the folder-picker dialogs for normal
-        // interactive use. The optional 3rd argument limits the run to bundles whose name contains it
-        // (case-insensitive) — handy for re-running just one bundle instead of the whole catalog.
-        string? installDir = args.Length is 2 or 3 ? args[0] : null;
-        string? outputDir = args.Length is 2 or 3 ? args[1] : null;
-        string? bundleFilter = args.Length == 3 ? args[2] : null;
-
-        bool interactive = installDir == null;
-        var settings = interactive ? UserSettings.Load() : null;
-
-        if (installDir == null)
-        {
-            var savedInstallDir = settings!.InstallDir;
-            if (savedInstallDir != null && !File.Exists(Path.Combine(savedInstallDir, "DistantWorlds2.exe")))
-                savedInstallDir = null; // no longer a valid DW2 install, don't offer to reuse it
-
-            installDir = ConfirmOrPickFolder(savedInstallDir,
-                "Use your previously selected Distant Worlds 2 install folder?",
-                "Select your Distant Worlds 2 install folder (contains DistantWorlds2.exe)");
-        }
-        if (installDir == null)
-        {
-            Console.WriteLine("Cancelled.");
-            return 1;
-        }
-        if (!File.Exists(Path.Combine(installDir, "DistantWorlds2.exe")))
-        {
-            Console.Error.WriteLine($"'{installDir}' doesn't look like a Distant Worlds 2 install (DistantWorlds2.exe not found there).");
-            return 1;
-        }
-
-        var bundlesDir = Path.Combine(installDir, "data", "db", "bundles");
-        if (!Directory.Exists(bundlesDir))
-        {
-            Console.Error.WriteLine($"No bundles found at '{bundlesDir}'.");
-            return 1;
-        }
-
-        var allBundles = BundleCatalog.ListBundleNames(bundlesDir).OrderBy(b => b, StringComparer.OrdinalIgnoreCase).ToList();
-        if (allBundles.Count == 0)
-        {
-            Console.Error.WriteLine($"No bundles found at '{bundlesDir}'.");
-            return 1;
-        }
-
-        List<string> selectedBundles;
-        if (bundleFilter != null)
-        {
-            // Scripted form: substring filter, no dialog.
-            selectedBundles = allBundles.Where(b => b.Contains(bundleFilter, StringComparison.OrdinalIgnoreCase)).ToList();
-            if (selectedBundles.Count == 0)
-            {
-                Console.Error.WriteLine($"No bundles match filter '{bundleFilter}'.");
-                return 1;
-            }
-        }
-        else if (!interactive)
-        {
-            // Scripted form with no filter: extract everything, no dialog.
-            selectedBundles = allBundles;
-        }
-        else
-        {
-            var picked = PickBundles(allBundles);
-            if (picked == null || picked.Count == 0)
-            {
-                Console.WriteLine("Cancelled.");
-                return 1;
-            }
-            selectedBundles = picked;
-        }
-
-        AssetKindFlags assetTypes;
-        if (!interactive)
-        {
-            // Scripted form: extract every supported asset type, no dialog.
-            assetTypes = AssetKindFlags.All;
-        }
-        else
-        {
-            var pickedTypes = PickAssetTypes();
-            if (pickedTypes is null or AssetKindFlags.None)
-            {
-                Console.WriteLine("Cancelled.");
-                return 1;
-            }
-            assetTypes = pickedTypes.Value;
-        }
-
-        // FBX export links each mesh's materials to their texture files (see MeshExporter) — those
-        // links are only useful if the referenced PNGs actually get extracted in this same run, so FBX
-        // always pulls PNG in with it, regardless of what was (or wasn't) checked in the dialog above.
-        if (assetTypes.HasFlag(AssetKindFlags.Fbx))
-            assetTypes |= AssetKindFlags.Png;
-
-        if (outputDir == null)
-        {
-            outputDir = ConfirmOrPickFolder(settings!.OutputDir,
-                "Use your previously selected output folder?",
-                "Select where extracted assets should be saved");
-        }
-        if (outputDir == null)
-        {
-            Console.WriteLine("Cancelled.");
-            return 1;
-        }
-
-        if (interactive)
-        {
-            settings!.InstallDir = installDir;
-            settings.OutputDir = outputDir;
-            settings.Save();
-        }
-
-        Console.WriteLine();
-        Console.WriteLine($"Install:  {installDir}");
-        Console.WriteLine($"Output:   {outputDir}");
-        Console.WriteLine($"Bundles:  {selectedBundles.Count} of {allBundles.Count} selected");
-        Console.WriteLine($"Types:    {string.Join(", ", AssetTypeOptions.Where(o => assetTypes.HasFlag(o.Flag)).Select(o => o.Label))}");
-        Console.WriteLine();
-
-        return await Extract(installDir, outputDir, selectedBundles, assetTypes);
+    private static string ResolveLogPath()
+    {
+        var envPath = Environment.GetEnvironmentVariable("DW2EXTRACT_LOG_PATH");
+        if (!string.IsNullOrWhiteSpace(envPath))
+            return envPath;
+        return Path.Combine(AppContext.BaseDirectory, "dw2extractor.log");
     }
 
     private static string? PickFolderCore(string description)
@@ -237,22 +307,22 @@ public static class Program
             foreach (var bundleName in allBundles)
                 listBox.Items.Add(bundleName, true);
 
-            var selectAllButton = new Button { Text = "Select All", Left = 10, Top = 420, Width = 90 };
+            var selectAllButton = new Button { Text = "All", Left = 10, Top = 432, Width = 90, Height = 36 };
             selectAllButton.Click += (_, _) =>
             {
                 for (int i = 0; i < listBox.Items.Count; i++)
                     listBox.SetItemChecked(i, true);
             };
 
-            var selectNoneButton = new Button { Text = "Select None", Left = 105, Top = 420, Width = 90 };
+            var selectNoneButton = new Button { Text = "Clear", Left = 105, Top = 432, Width = 90, Height = 36 };
             selectNoneButton.Click += (_, _) =>
             {
                 for (int i = 0; i < listBox.Items.Count; i++)
                     listBox.SetItemChecked(i, false);
             };
 
-            var okButton = new Button { Text = "OK", Left = 220, Top = 420, Width = 80, DialogResult = DialogResult.OK };
-            var cancelButton = new Button { Text = "Cancel", Left = 305, Top = 420, Width = 85, DialogResult = DialogResult.Cancel };
+            var okButton = new Button { Text = "OK", Left = 220, Top = 432, Width = 80, Height = 36, DialogResult = DialogResult.OK };
+            var cancelButton = new Button { Text = "Cancel", Left = 305, Top = 432, Width = 85, Height = 36, DialogResult = DialogResult.Cancel };
 
             form.Controls.Add(listBox);
             form.Controls.Add(selectAllButton);
@@ -311,22 +381,22 @@ public static class Program
                     listBox.SetItemChecked(pngIndex, true);
             };
 
-            var selectAllButton = new Button { Text = "Select All", Left = 10, Top = 200, Width = 90 };
+            var selectAllButton = new Button { Text = "All", Left = 10, Top = 212, Width = 90, Height = 36 };
             selectAllButton.Click += (_, _) =>
             {
                 for (int i = 0; i < listBox.Items.Count; i++)
                     listBox.SetItemChecked(i, true);
             };
 
-            var selectNoneButton = new Button { Text = "Select None", Left = 105, Top = 200, Width = 90 };
+            var selectNoneButton = new Button { Text = "Clear", Left = 105, Top = 212, Width = 90, Height = 36 };
             selectNoneButton.Click += (_, _) =>
             {
                 for (int i = 0; i < listBox.Items.Count; i++)
                     listBox.SetItemChecked(i, false);
             };
 
-            var okButton = new Button { Text = "OK", Left = 220, Top = 200, Width = 80, DialogResult = DialogResult.OK };
-            var cancelButton = new Button { Text = "Cancel", Left = 305, Top = 200, Width = 85, DialogResult = DialogResult.Cancel };
+            var okButton = new Button { Text = "OK", Left = 220, Top = 212, Width = 80, Height = 36, DialogResult = DialogResult.OK };
+            var cancelButton = new Button { Text = "Cancel", Left = 305, Top = 212, Width = 85, Height = 36, DialogResult = DialogResult.Cancel };
 
             form.Controls.Add(listBox);
             form.Controls.Add(selectAllButton);
@@ -351,7 +421,7 @@ public static class Program
         return result;
     }
 
-    private static async Task<int> Extract(string installDir, string outputDir, List<string> selectedBundles, AssetKindFlags assetTypes)
+    private static async Task<int> Extract(string installDir, string outputDir, List<string> selectedBundles, AssetKindFlags assetTypes, int maxParallelBundles, bool verbose)
     {
         VirtualFileSystem.MountFileSystem(VfsRoot, installDir); // Xenko-side (bundle container plumbing)
         Stride.Core.IO.VirtualFileSystem.MountFileSystem(VfsRoot, installDir); // Stride-side (MeshExporter's ContentManager)
@@ -365,61 +435,127 @@ public static class Program
         // No cross-bundle deduplication: the same path can legitimately appear once per bundle that
         // declares it.
         var stats = new Stats();
+        var statsLock = new object();
+        var activeBundles = 0;
+        var maxObservedConcurrentBundles = 0;
+        var totalStopwatch = Stopwatch.StartNew();
 
-        foreach (var bundleName in selectedBundles)
-        {
-            Console.WriteLine($"=== {bundleName} ===");
+        await Parallel.ForEachAsync(
+            selectedBundles,
+            new ParallelOptions { MaxDegreeOfParallelism = maxParallelBundles },
+            async (bundleName, _) =>
+            {
+                var bundleStopwatch = Stopwatch.StartNew();
+                var currentActive = Interlocked.Increment(ref activeBundles);
+                UpdateMaxObserved(ref maxObservedConcurrentBundles, currentActive);
+                if (verbose)
+                    RunLogger.Info($"[bundle-start] {bundleName} active={currentActive}/{maxParallelBundles}");
 
-            List<string> ownAssetUrls;
-            try
-            {
-                var bundleFileUrl = $"{VfsRoot}/data/db/bundles/{bundleName}.bundle";
-                var description = Stride.Core.Storage.BundleOdbBackend.ReadBundleHeader(bundleFileUrl, out _);
-                ownAssetUrls = description.Assets.Select(kv => kv.Key).ToList();
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"  Failed to read bundle header for '{bundleName}': {ex.Message}");
-                continue;
-            }
-
-            // Still loaded the normal (dependency-resolving) way — we need that to actually read asset
-            // bytes, since e.g. a Model's Buffer references are resolved through the loaded object graph.
-            // Only *which* asset URLs we process for this bundle comes from its own declared list above.
-            ObjectDatabase odb;
-            try
-            {
-                odb = new ObjectDatabase($"{VfsRoot}/data/db", "index", $"{VfsRoot}/data/db");
-                await odb.LoadBundle(bundleName);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"  Failed to load bundle '{bundleName}': {ex.Message}");
-                continue;
-            }
-
-            using (odb)
-            {
-                var fileProvider = new DatabaseFileProvider(odb);
-
-                foreach (var url in ownAssetUrls)
+                var bundleStats = await ExtractBundle(bundleName, outputDir, assetTypes);
+                lock (statsLock)
                 {
-                    if (url.EndsWith("_Data", StringComparison.Ordinal) || url.EndsWith("/path", StringComparison.Ordinal))
-                        continue; // companions, handled by their primary asset
-
-                    await ExtractOne(odb, fileProvider, bundleName, url, outputDir, assetTypes, stats);
+                    stats.MergeFrom(bundleStats);
                 }
+
+                var remainingActive = Interlocked.Decrement(ref activeBundles);
+                if (verbose)
+                    RunLogger.Info($"[bundle-done]  {bundleName} elapsed={bundleStopwatch.Elapsed:hh\\:mm\\:ss} success={bundleStats.SuccessfulAssets} failed={bundleStats.Failures} active={remainingActive}/{maxParallelBundles}");
+            });
+
+        var successfulAssets = stats.Textures + stats.Sounds + stats.Meshes + stats.Raw;
+        var attemptedAssets = successfulAssets + stats.Failures;
+
+        RunLogger.Info(string.Empty);
+        RunLogger.Info($"Done. {successfulAssets} assets succeeded, {stats.Failures} failed, {attemptedAssets} total attempted.");
+        RunLogger.Info($"Successful assets by type: {stats.Textures} textures, {stats.Sounds} sounds, {stats.Meshes} meshes, {stats.Raw} other.");
+        RunLogger.Info($"Output files created: {stats.DdsFiles} dds, {stats.PngFiles} png, {stats.WavFiles} wav, {stats.FbxFiles} fbx, {stats.OtherFiles} other.");
+        RunLogger.Info($"Average time per successful asset: textures {stats.GetAverageMilliseconds(stats.TextureMilliseconds, stats.Textures):0.0} ms, sounds {stats.GetAverageMilliseconds(stats.SoundMilliseconds, stats.Sounds):0.0} ms, meshes {stats.GetAverageMilliseconds(stats.MeshMilliseconds, stats.Meshes):0.0} ms, other {stats.GetAverageMilliseconds(stats.RawMilliseconds, stats.Raw):0.0} ms.");
+        if (verbose)
+            RunLogger.Info($"Parallel efficacy: max concurrent bundles observed {maxObservedConcurrentBundles}/{maxParallelBundles}, total elapsed {totalStopwatch.Elapsed:hh\\:mm\\:ss}.");
+
+        if (stats.Failures > 0)
+        {
+            RunLogger.Info(string.Empty);
+            RunLogger.Yellow("Failures:");
+            foreach (var failure in stats.FailureDetails)
+                RunLogger.Yellow($"  - {failure}");
+        }
+
+        return 0;
+    }
+
+    private static void UpdateMaxObserved(ref int maxObserved, int candidate)
+    {
+        while (true)
+        {
+            var current = maxObserved;
+            if (candidate <= current)
+                return;
+            if (Interlocked.CompareExchange(ref maxObserved, candidate, current) == current)
+                return;
+        }
+    }
+
+    private static async Task<Stats> ExtractBundle(string bundleName, string outputDir, AssetKindFlags assetTypes)
+    {
+        var stats = new Stats();
+
+        List<string> ownAssetUrls;
+        try
+        {
+            var bundleFileUrl = $"{VfsRoot}/data/db/bundles/{bundleName}.bundle";
+            var description = Stride.Core.Storage.BundleOdbBackend.ReadBundleHeader(bundleFileUrl, out _);
+            ownAssetUrls = description.Assets.Select(kv => kv.Key).ToList();
+        }
+        catch (Exception ex)
+        {
+            stats.Failures++;
+            stats.FailureDetails.Add($"{bundleName}:(bundle header) -> {ex.Message}");
+            RunLogger.Error($"  Failed to read bundle header for '{bundleName}': {ex.Message}");
+            return stats;
+        }
+
+        ObjectDatabase odb;
+        try
+        {
+            odb = new ObjectDatabase($"{VfsRoot}/data/db", "index", $"{VfsRoot}/data/db");
+            await odb.LoadBundle(bundleName);
+        }
+        catch (Exception ex)
+        {
+            stats.Failures++;
+            stats.FailureDetails.Add($"{bundleName}:(bundle load) -> {ex.Message}");
+            RunLogger.Error($"  Failed to load bundle '{bundleName}': {ex.Message}");
+            return stats;
+        }
+
+        var totalAssets = ownAssetUrls.Count(url => !url.EndsWith("_Data", StringComparison.Ordinal) && !url.EndsWith("/path", StringComparison.Ordinal));
+        var processedAssets = 0;
+
+        using (odb)
+        {
+            var fileProvider = new DatabaseFileProvider(odb);
+
+            foreach (var url in ownAssetUrls)
+            {
+                if (url.EndsWith("_Data", StringComparison.Ordinal) || url.EndsWith("/path", StringComparison.Ordinal))
+                    continue;
+
+                await ExtractOne(odb, fileProvider, bundleName, url, outputDir, assetTypes, stats);
+                processedAssets++;
+
+                if (processedAssets == totalAssets || processedAssets % BundleProgressLogInterval == 0)
+                    RunLogger.Info($"  [{bundleName}] {processedAssets}/{totalAssets} assets processed");
             }
         }
 
-        Console.WriteLine();
-        Console.WriteLine($"Done. {stats.Textures} textures, {stats.Sounds} sounds, {stats.Meshes} meshes, {stats.Raw} other files copied, {stats.Failures} failed.");
-        return 0;
+        return stats;
     }
 
     private static async Task ExtractOne(ObjectDatabase odb, DatabaseFileProvider fileProvider, string bundleName, string url, string outputDir, AssetKindFlags assetTypes, Stats stats)
     {
         var destBase = Path.Combine(outputDir, bundleName, AssetUrlPaths.Sanitize(url));
+        var startedAt = Stopwatch.GetTimestamp();
 
         try
         {
@@ -461,7 +597,7 @@ public static class Program
                             // path in Xenko's Image.Save — the .dds itself already succeeded, so don't fail the
                             // whole asset over a missing PNG. Since PNG conversion failed, keep the .dds around
                             // regardless of whether the user asked for it, so the asset isn't lost entirely.
-                            Console.Error.WriteLine($"  (no PNG for {url}: {ex.Message})");
+                            RunLogger.Warn($"  (no PNG for {url}: {ex.Message})");
                         }
                     }
 
@@ -469,6 +605,11 @@ public static class Program
                         File.Delete(destBase + ".dds");
 
                     stats.Textures++;
+                    if (wantDds || !pngOk)
+                        stats.DdsFiles++;
+                    if (pngOk)
+                        stats.PngFiles++;
+                    stats.TextureMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
                     break;
                 }
 
@@ -483,6 +624,8 @@ public static class Program
                     SoundConverter.XenkoToSoundfile(rawPath, destBase + ".wav");
                     CleanupRaw(rawPath);
                     stats.Sounds++;
+                    stats.WavFiles++;
+                    stats.SoundMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
                     break;
                 }
 
@@ -491,6 +634,8 @@ public static class Program
                         return;
                     await MeshExporter.ExportToFbx(bundleName, url, destBase + ".fbx", outputDir, VfsRoot);
                     stats.Meshes++;
+                    stats.FbxFiles++;
+                    stats.MeshMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
                     break;
 
                 case DW2AssetKind.RawOrUnknown:
@@ -500,13 +645,16 @@ public static class Program
                     if (!await BundleExtractor.ExtractRaw(odb, fileProvider, url, destBase))
                         throw new IOException("extract failed");
                     stats.Raw++;
+                    stats.OtherFiles += CountRawOutputFiles(destBase);
+                    stats.RawMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
                     break;
             }
         }
         catch (Exception ex)
         {
             stats.Failures++;
-            Console.Error.WriteLine($"  FAILED {url}: {ex.Message}");
+            stats.FailureDetails.Add($"{bundleName}:{url} -> {ex.Message}");
+            RunLogger.Error($"  FAILED {url}: {ex.Message}");
         }
     }
 
@@ -517,8 +665,44 @@ public static class Program
             File.Delete(rawPath + "_Data");
     }
 
+    private static int CountRawOutputFiles(string destBase)
+    {
+        var count = 0;
+        if (File.Exists(destBase))
+            count++;
+        if (File.Exists(destBase + "_Data"))
+            count++;
+        return count;
+    }
+
     private class Stats
     {
         public int Textures, Sounds, Meshes, Raw, Failures;
+        public int DdsFiles, PngFiles, WavFiles, FbxFiles, OtherFiles;
+        public double TextureMilliseconds, SoundMilliseconds, MeshMilliseconds, RawMilliseconds;
+        public List<string> FailureDetails { get; } = [];
+        public int SuccessfulAssets => Textures + Sounds + Meshes + Raw;
+
+        public void MergeFrom(Stats other)
+        {
+            Textures += other.Textures;
+            Sounds += other.Sounds;
+            Meshes += other.Meshes;
+            Raw += other.Raw;
+            Failures += other.Failures;
+            DdsFiles += other.DdsFiles;
+            PngFiles += other.PngFiles;
+            WavFiles += other.WavFiles;
+            FbxFiles += other.FbxFiles;
+            OtherFiles += other.OtherFiles;
+            TextureMilliseconds += other.TextureMilliseconds;
+            SoundMilliseconds += other.SoundMilliseconds;
+            MeshMilliseconds += other.MeshMilliseconds;
+            RawMilliseconds += other.RawMilliseconds;
+            FailureDetails.AddRange(other.FailureDetails);
+        }
+
+        public double GetAverageMilliseconds(double totalMilliseconds, int count)
+            => count == 0 ? 0 : totalMilliseconds / count;
     }
 }

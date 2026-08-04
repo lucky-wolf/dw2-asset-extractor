@@ -6,6 +6,15 @@ namespace DistantWorlds2.Core;
 
 public static class TextureConverter
 {
+    private static int ffmpegTimeoutMs = 5 * 60 * 1000;
+
+    public static void SetFfmpegTimeoutSeconds(int timeoutSeconds)
+    {
+        if (timeoutSeconds <= 0)
+            return;
+        ffmpegTimeoutMs = timeoutSeconds * 1000;
+    }
+
     public static void XenkoToDds(string src, string dst)
     {
         using var srcFs = File.OpenRead(src);
@@ -75,6 +84,7 @@ public static class TextureConverter
         using var proc = new System.Diagnostics.Process();
         proc.StartInfo.FileName = Path.Combine(ffmpegPath, "ffmpeg.exe");
         proc.StartInfo.ArgumentList.Add("-y");
+        proc.StartInfo.ArgumentList.Add("-nostdin");
         proc.StartInfo.ArgumentList.Add("-loglevel");
         proc.StartInfo.ArgumentList.Add("error");
         proc.StartInfo.ArgumentList.Add("-i");
@@ -90,7 +100,12 @@ public static class TextureConverter
         // code + output file checks below are how we detect failure.
         proc.StartInfo.CreateNoWindow = true;
         proc.Start();
-        proc.WaitForExit();
+
+        if (!proc.WaitForExit(ffmpegTimeoutMs))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            throw new TimeoutException($"ffmpeg timed out after {ffmpegTimeoutMs / 1000}s while converting DDS to PNG");
+        }
 
         if (proc.ExitCode != 0 || !File.Exists(pngPath) || new FileInfo(pngPath).Length == 0)
         {

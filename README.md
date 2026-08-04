@@ -5,6 +5,26 @@ A modding tool for [Distant Worlds 2](https://www.matrixgames.com/game/distant-w
 DW2 install, and it walks the game's `.bundle` files and converts everything to
 standard formats on your local disk.
 
+## The Easy Way
+
+If you just want to build it and run it, use the repo-root helper scripts:
+
+1. Run `build.bat`
+2. Run `run.bat`
+
+`build.bat` checks prerequisites, helps find your DW2 install, writes the local
+build props file, restores NuGet packages, and builds the tool. `run.bat` then
+launches the built extractor and captures a copy of the run output to
+`LastRun.log`.
+
+If your machine is already set up to run PowerShell scripts directly, you can use
+the equivalent `.ps1` entrypoints instead:
+
+1. Run `./build.ps1`
+2. Run `./run.ps1`
+
+The detailed/manual setup notes are still below if you want the full breakdown.
+
 ## What it does
 
 Run `dw2extract.exe` and it walks you through two checklists, then asks where
