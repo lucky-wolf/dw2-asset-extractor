@@ -25,6 +25,13 @@ public static class Program
         All = Dds | Png | Wav | Fbx | Misc,
     }
 
+    private enum FileHandlingMode
+    {
+        Unspecified,
+        Overwrite,
+        SkipExisting,
+    }
+
     private static readonly (string Label, AssetKindFlags Flag)[] AssetTypeOptions =
     [
         ("Textures - DDS (.dds)", AssetKindFlags.Dds),
@@ -59,6 +66,8 @@ public static class Program
             string? installDir = options.InstallDir;
             string? outputDir = options.OutputDir;
             string? bundleFilter = options.BundleFilter;
+            var fileMode = options.FileMode;
+            var fileModeExplicitlySet = options.FileModeExplicitlySet;
 
             var settings = UserSettings.Load();
             TextureConverter.SetFfmpegTimeoutSeconds(settings.GetTextureFfmpegTimeoutSeconds());
@@ -99,6 +108,38 @@ public static class Program
             {
                 RunLogger.Info("Cancelled.");
                 return 1;
+            }
+
+            // Determine file handling mode: either explicitly set via CLI, or prompt/default based on folder state.
+            if (fileMode == FileHandlingMode.Unspecified)
+            {
+                var folderExists = Directory.Exists(outputDir);
+                var folderIsEmpty = !folderExists || !Directory.EnumerateFileSystemEntries(outputDir).Any();
+
+                if (!folderIsEmpty)
+                {
+                    // Folder exists and is not empty — must prompt (in interactive mode) or error (in non-interactive)
+                    if (interactive)
+                    {
+                        var pickedMode = PickFileHandlingMode();
+                        if (pickedMode is null)
+                        {
+                            RunLogger.Info("Cancelled.");
+                            return 1;
+                        }
+                        fileMode = pickedMode.Value;
+                    }
+                    else
+                    {
+                        RunLogger.Error("Output folder is not empty. Specify -overwrite or -skip-existing to proceed in non-interactive mode.");
+                        return 1;
+                    }
+                }
+                else
+                {
+                    // Folder is empty or doesn't exist — default to Overwrite
+                    fileMode = FileHandlingMode.Overwrite;
+                }
             }
 
             var bundlesDir = Path.Combine(installDir, "data", "db", "bundles");
@@ -172,11 +213,12 @@ public static class Program
             RunLogger.Info($"Bundles:   {selectedBundles.Count} of {allBundles.Count} selected");
             RunLogger.Info($"Types:     {string.Join(", ", AssetTypeOptions.Where(o => assetTypes.HasFlag(o.Flag)).Select(o => o.Label))}");
             RunLogger.Info($"Parallel:  {maxParallelBundles} bundle worker(s)");
+            RunLogger.Info($"File Mode: {(fileMode == FileHandlingMode.Overwrite ? "overwrite" : fileMode == FileHandlingMode.SkipExisting ? "skip existing" : "unspecified")}");
             if (verbose)
                 RunLogger.Info("Verbose:   enabled");
             RunLogger.Info(string.Empty);
 
-            return await Extract(installDir, outputDir, selectedBundles, assetTypes, maxParallelBundles, verbose);
+            return await Extract(installDir, outputDir, selectedBundles, assetTypes, maxParallelBundles, verbose, fileMode);
         }
         finally
         {
@@ -191,6 +233,8 @@ public static class Program
         public string? BundleFilter { get; init; }
         public int? MaxParallelBundles { get; init; }
         public bool Verbose { get; init; }
+        public FileHandlingMode FileMode { get; init; } = FileHandlingMode.Unspecified;
+        public bool FileModeExplicitlySet { get; init; }
     }
 
     private static CommandLineOptions ParseArgs(string[] args)
@@ -198,6 +242,8 @@ public static class Program
         var positional = new List<string>();
         int? maxParallelBundles = null;
         var verbose = false;
+        var fileMode = FileHandlingMode.Unspecified;
+        var fileModeExplicitlySet = false;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -216,11 +262,25 @@ public static class Program
                 continue;
             }
 
+            if (arg is "-overwrite")
+            {
+                fileMode = FileHandlingMode.Overwrite;
+                fileModeExplicitlySet = true;
+                continue;
+            }
+
+            if (arg is "-skip-existing")
+            {
+                fileMode = FileHandlingMode.SkipExisting;
+                fileModeExplicitlySet = true;
+                continue;
+            }
+
             positional.Add(arg);
         }
 
         if (positional.Count != 0 && positional.Count != 2 && positional.Count != 3)
-            throw new ArgumentException("Usage: dw2extract.exe [<installDir> <outputDir> [bundleNameFilter]] [-j <count>] [-v]");
+            throw new ArgumentException("Usage: dw2extract.exe [<installDir> <outputDir> [bundleNameFilter]] [-overwrite | -skip-existing] [-j <count>] [-v]");
 
         return new CommandLineOptions
         {
@@ -229,6 +289,8 @@ public static class Program
             BundleFilter = positional.Count == 3 ? positional[2] : null,
             MaxParallelBundles = maxParallelBundles,
             Verbose = verbose,
+            FileMode = fileMode,
+            FileModeExplicitlySet = fileModeExplicitlySet,
         };
     }
 
@@ -421,7 +483,34 @@ public static class Program
         return result;
     }
 
-    private static async Task<int> Extract(string installDir, string outputDir, List<string> selectedBundles, AssetKindFlags assetTypes, int maxParallelBundles, bool verbose)
+    private static FileHandlingMode? PickFileHandlingMode()
+    {
+        FileHandlingMode? result = null;
+        var thread = new Thread(() =>
+        {
+            var choice = MessageBox.Show(
+                "Output folder already contains files.\n\n" +
+                "Yes = Overwrite existing files\n" +
+                "No = Skip existing files\n" +
+                "Cancel = Abort extraction",
+                "Distant Worlds 2 Asset Extractor",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button3); // Default to Cancel
+
+            if (choice == DialogResult.Yes)
+                result = FileHandlingMode.Overwrite;
+            else if (choice == DialogResult.No)
+                result = FileHandlingMode.SkipExisting;
+            // Cancel -> result stays null
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return result;
+    }
+
+    private static async Task<int> Extract(string installDir, string outputDir, List<string> selectedBundles, AssetKindFlags assetTypes, int maxParallelBundles, bool verbose, FileHandlingMode fileMode)
     {
         VirtualFileSystem.MountFileSystem(VfsRoot, installDir); // Xenko-side (bundle container plumbing)
         Stride.Core.IO.VirtualFileSystem.MountFileSystem(VfsRoot, installDir); // Stride-side (MeshExporter's ContentManager)
@@ -451,7 +540,7 @@ public static class Program
                 if (verbose)
                     RunLogger.Info($"[bundle-start] {bundleName} active={currentActive}/{maxParallelBundles}");
 
-                var bundleStats = await ExtractBundle(bundleName, outputDir, assetTypes);
+                var bundleStats = await ExtractBundle(bundleName, outputDir, assetTypes, fileMode);
                 lock (statsLock)
                 {
                     stats.MergeFrom(bundleStats);
@@ -463,12 +552,17 @@ public static class Program
             });
 
         var successfulAssets = stats.Textures + stats.Sounds + stats.Meshes + stats.Raw;
-        var attemptedAssets = successfulAssets + stats.Failures;
+        var attemptedAssets = successfulAssets + stats.Failures + stats.Skipped;
 
         RunLogger.Info(string.Empty);
-        RunLogger.Info($"Done. {successfulAssets} assets succeeded, {stats.Failures} failed, {attemptedAssets} total attempted.");
+        if (stats.Skipped > 0)
+            RunLogger.Info($"Done. {successfulAssets} assets succeeded, {stats.Skipped} skipped, {stats.Failures} failed, {attemptedAssets} total attempted.");
+        else
+            RunLogger.Info($"Done. {successfulAssets} assets succeeded, {stats.Failures} failed, {attemptedAssets} total attempted.");
         RunLogger.Info($"Successful assets by type: {stats.Textures} textures, {stats.Sounds} sounds, {stats.Meshes} meshes, {stats.Raw} other.");
         RunLogger.Info($"Output files created: {stats.DdsFiles} dds, {stats.PngFiles} png, {stats.WavFiles} wav, {stats.FbxFiles} fbx, {stats.OtherFiles} other.");
+        if (stats.SkippedFiles > 0)
+            RunLogger.Info($"Output files skipped: {stats.SkippedFiles} (due to skip-existing mode).");
         RunLogger.Info($"Average time per successful asset: textures {stats.GetAverageMilliseconds(stats.TextureMilliseconds, stats.Textures):0.0} ms, sounds {stats.GetAverageMilliseconds(stats.SoundMilliseconds, stats.Sounds):0.0} ms, meshes {stats.GetAverageMilliseconds(stats.MeshMilliseconds, stats.Meshes):0.0} ms, other {stats.GetAverageMilliseconds(stats.RawMilliseconds, stats.Raw):0.0} ms.");
         if (verbose)
             RunLogger.Info($"Parallel efficacy: max concurrent bundles observed {maxObservedConcurrentBundles}/{maxParallelBundles}, total elapsed {totalStopwatch.Elapsed:hh\\:mm\\:ss}.");
@@ -496,7 +590,15 @@ public static class Program
         }
     }
 
-    private static async Task<Stats> ExtractBundle(string bundleName, string outputDir, AssetKindFlags assetTypes)
+    private static bool ShouldWriteFile(string destPath, FileHandlingMode fileMode)
+    {
+        if (fileMode == FileHandlingMode.Overwrite)
+            return true;
+        // SkipExisting: only write if file doesn't exist
+        return !File.Exists(destPath);
+    }
+
+    private static async Task<Stats> ExtractBundle(string bundleName, string outputDir, AssetKindFlags assetTypes, FileHandlingMode fileMode)
     {
         var stats = new Stats();
 
@@ -541,7 +643,7 @@ public static class Program
                 if (url.EndsWith("_Data", StringComparison.Ordinal) || url.EndsWith("/path", StringComparison.Ordinal))
                     continue;
 
-                await ExtractOne(odb, fileProvider, bundleName, url, outputDir, assetTypes, stats);
+                await ExtractOne(odb, fileProvider, bundleName, url, outputDir, assetTypes, fileMode, stats);
                 processedAssets++;
 
                 if (processedAssets == totalAssets || processedAssets % BundleProgressLogInterval == 0)
@@ -552,7 +654,7 @@ public static class Program
         return stats;
     }
 
-    private static async Task ExtractOne(ObjectDatabase odb, DatabaseFileProvider fileProvider, string bundleName, string url, string outputDir, AssetKindFlags assetTypes, Stats stats)
+    private static async Task ExtractOne(ObjectDatabase odb, DatabaseFileProvider fileProvider, string bundleName, string url, string outputDir, AssetKindFlags assetTypes, FileHandlingMode fileMode, Stats stats)
     {
         var destBase = Path.Combine(outputDir, bundleName, AssetUrlPaths.Sanitize(url));
         var startedAt = Stopwatch.GetTimestamp();
@@ -576,10 +678,21 @@ public static class Program
                     if (!wantDds && !wantPng)
                         return;
 
+                    // Check if output already exists in skip mode
+                    var ddsPath = destBase + ".dds";
+                    if (fileMode == FileHandlingMode.SkipExisting && File.Exists(ddsPath))
+                    {
+                        stats.Skipped++;
+                        stats.SkippedFiles++;
+                        if (File.Exists(destBase + ".png"))
+                            stats.SkippedFiles++;
+                        return;
+                    }
+
                     var rawPath = destBase + ".raw";
                     if (!await BundleExtractor.ExtractRaw(odb, fileProvider, url, rawPath))
                         throw new IOException("extract failed");
-                    TextureConverter.XenkoToDds(rawPath, destBase + ".dds");
+                    TextureConverter.XenkoToDds(rawPath, ddsPath);
                     CleanupRaw(rawPath);
                     File.Delete(destBase + ".dds.refs");
 
@@ -588,7 +701,7 @@ public static class Program
                     {
                         try
                         {
-                            TextureConverter.DdsToPng(destBase + ".dds", destBase + ".png");
+                            TextureConverter.DdsToPng(ddsPath, destBase + ".png");
                             pngOk = true;
                         }
                         catch (Exception ex)
@@ -602,7 +715,7 @@ public static class Program
                     }
 
                     if (!wantDds && pngOk)
-                        File.Delete(destBase + ".dds");
+                        File.Delete(ddsPath);
 
                     stats.Textures++;
                     if (wantDds || !pngOk)
@@ -618,10 +731,19 @@ public static class Program
                     if (!assetTypes.HasFlag(AssetKindFlags.Wav))
                         return;
 
+                    // Check if output already exists in skip mode
+                    var wavPath = destBase + ".wav";
+                    if (fileMode == FileHandlingMode.SkipExisting && File.Exists(wavPath))
+                    {
+                        stats.Skipped++;
+                        stats.SkippedFiles++;
+                        return;
+                    }
+
                     var rawPath = destBase + ".raw";
                     if (!await BundleExtractor.ExtractRaw(odb, fileProvider, url, rawPath))
                         throw new IOException("extract failed");
-                    SoundConverter.XenkoToSoundfile(rawPath, destBase + ".wav");
+                    SoundConverter.XenkoToSoundfile(rawPath, wavPath);
                     CleanupRaw(rawPath);
                     stats.Sounds++;
                     stats.WavFiles++;
@@ -632,7 +754,17 @@ public static class Program
                 case DW2AssetKind.Model:
                     if (!assetTypes.HasFlag(AssetKindFlags.Fbx))
                         return;
-                    await MeshExporter.ExportToFbx(bundleName, url, destBase + ".fbx", outputDir, VfsRoot);
+
+                    // Check if output already exists in skip mode
+                    var fbxPath = destBase + ".fbx";
+                    if (fileMode == FileHandlingMode.SkipExisting && File.Exists(fbxPath))
+                    {
+                        stats.Skipped++;
+                        stats.SkippedFiles++;
+                        return;
+                    }
+
+                    await MeshExporter.ExportToFbx(bundleName, url, fbxPath, outputDir, VfsRoot);
                     stats.Meshes++;
                     stats.FbxFiles++;
                     stats.MeshMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
@@ -642,6 +774,20 @@ public static class Program
                 default:
                     if (!assetTypes.HasFlag(AssetKindFlags.Misc))
                         return;
+
+                    // Check if output already exists in skip mode
+                    if (fileMode == FileHandlingMode.SkipExisting && (File.Exists(destBase) || File.Exists(destBase + "_Data")))
+                    {
+                        stats.Skipped++;
+                        var count = 0;
+                        if (File.Exists(destBase))
+                            count++;
+                        if (File.Exists(destBase + "_Data"))
+                            count++;
+                        stats.SkippedFiles += count;
+                        return;
+                    }
+
                     if (!await BundleExtractor.ExtractRaw(odb, fileProvider, url, destBase))
                         throw new IOException("extract failed");
                     stats.Raw++;
@@ -677,8 +823,8 @@ public static class Program
 
     private class Stats
     {
-        public int Textures, Sounds, Meshes, Raw, Failures;
-        public int DdsFiles, PngFiles, WavFiles, FbxFiles, OtherFiles;
+        public int Textures, Sounds, Meshes, Raw, Failures, Skipped;
+        public int DdsFiles, PngFiles, WavFiles, FbxFiles, OtherFiles, SkippedFiles;
         public double TextureMilliseconds, SoundMilliseconds, MeshMilliseconds, RawMilliseconds;
         public List<string> FailureDetails { get; } = [];
         public int SuccessfulAssets => Textures + Sounds + Meshes + Raw;
@@ -690,11 +836,13 @@ public static class Program
             Meshes += other.Meshes;
             Raw += other.Raw;
             Failures += other.Failures;
+            Skipped += other.Skipped;
             DdsFiles += other.DdsFiles;
             PngFiles += other.PngFiles;
             WavFiles += other.WavFiles;
             FbxFiles += other.FbxFiles;
             OtherFiles += other.OtherFiles;
+            SkippedFiles += other.SkippedFiles;
             TextureMilliseconds += other.TextureMilliseconds;
             SoundMilliseconds += other.SoundMilliseconds;
             MeshMilliseconds += other.MeshMilliseconds;
