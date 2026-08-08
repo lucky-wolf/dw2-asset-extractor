@@ -1,6 +1,8 @@
 using Xenko.Core.Serialization;
 using Xenko.Core.Serialization.Contents;
 using Xenko.Graphics;
+using FFMpegCore;
+using FFMpegCore.Helpers;
 
 namespace DistantWorlds2.Core;
 
@@ -87,8 +89,20 @@ public static class TextureConverter
         proc.StartInfo.ArgumentList.Add("-nostdin");
         proc.StartInfo.ArgumentList.Add("-loglevel");
         proc.StartInfo.ArgumentList.Add("error");
+        // Force full-range RGB interpretation for DDS
+        proc.StartInfo.ArgumentList.Add("-color_range");
+        proc.StartInfo.ArgumentList.Add("pc");
         proc.StartInfo.ArgumentList.Add("-i");
         proc.StartInfo.ArgumentList.Add(ddsPath);
+        // Swap R and B channels via colorchannelmixer (ffmpeg's DDS decoder comes out BGR-ordered).
+        // This maps: R(out)=B(in), G(out)=G(in), B(out)=R(in); alpha (aa) is left at its default of 1,
+        // i.e. passed through unchanged. Output format is rgba, not rgb24 — rgb24 has no alpha plane at
+        // all, which was flattening every transparent pixel to opaque black.
+        proc.StartInfo.ArgumentList.Add("-vf");
+        proc.StartInfo.ArgumentList.Add("colorchannelmixer=rr=0:rb=1:br=1:bb=0,format=rgba");
+        // Ensure output is full range
+        proc.StartInfo.ArgumentList.Add("-color_range");
+        proc.StartInfo.ArgumentList.Add("pc");
         proc.StartInfo.ArgumentList.Add("-frames:v");
         proc.StartInfo.ArgumentList.Add("1");
         proc.StartInfo.ArgumentList.Add(pngPath);

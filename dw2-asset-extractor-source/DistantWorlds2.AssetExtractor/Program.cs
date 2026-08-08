@@ -172,13 +172,14 @@ public static class Program
             }
             else
             {
-                var picked = PickBundles(allBundles);
+                var picked = PickBundles(allBundles, settings.LastSelectedBundles);
                 if (picked == null || picked.Count == 0)
                 {
                     RunLogger.Info("Cancelled.");
                     return 1;
                 }
                 selectedBundles = picked;
+                settings.LastSelectedBundles = picked.Count == allBundles.Count ? null : picked;
             }
 
             AssetKindFlags assetTypes;
@@ -188,13 +189,16 @@ public static class Program
             }
             else
             {
-                var pickedTypes = PickAssetTypes();
+                var pickedTypes = PickAssetTypes(settings.LastSelectedAssetTypes);
                 if (pickedTypes is null or AssetKindFlags.None)
                 {
                     RunLogger.Info("Cancelled.");
                     return 1;
                 }
                 assetTypes = pickedTypes.Value;
+                settings.LastSelectedAssetTypes = assetTypes == AssetKindFlags.All
+                    ? null
+                    : AssetTypeOptions.Where(o => assetTypes.HasFlag(o.Flag)).Select(o => o.Flag.ToString()).ToList();
             }
 
             if (assetTypes.HasFlag(AssetKindFlags.Fbx))
@@ -341,7 +345,7 @@ public static class Program
         return result;
     }
 
-    private static List<string>? PickBundles(List<string> allBundles)
+    private static List<string>? PickBundles(List<string> allBundles, List<string>? lastSelected)
     {
         List<string>? result = null;
         var thread = new Thread(() =>
@@ -366,8 +370,13 @@ public static class Program
                 CheckOnClick = true,
                 IntegralHeight = false,
             };
+            // null lastSelected means "all" (either never picked before, or last pick was everything) —
+            // default every item checked in that case rather than treating it as an empty saved pick.
             foreach (var bundleName in allBundles)
-                listBox.Items.Add(bundleName, true);
+            {
+                var isChecked = lastSelected == null || lastSelected.Contains(bundleName, StringComparer.OrdinalIgnoreCase);
+                listBox.Items.Add(bundleName, isChecked);
+            }
 
             var selectAllButton = new Button { Text = "All", Left = 10, Top = 432, Width = 90, Height = 36 };
             selectAllButton.Click += (_, _) =>
@@ -403,7 +412,7 @@ public static class Program
         return result;
     }
 
-    private static AssetKindFlags? PickAssetTypes()
+    private static AssetKindFlags? PickAssetTypes(List<string>? lastSelected)
     {
         AssetKindFlags? result = null;
         var thread = new Thread(() =>
@@ -428,8 +437,13 @@ public static class Program
                 CheckOnClick = true,
                 IntegralHeight = false,
             };
-            foreach (var (label, _) in AssetTypeOptions)
-                listBox.Items.Add(label, true);
+            // null lastSelected means "all" (either never picked before, or last pick was everything) —
+            // default every item checked in that case rather than treating it as an empty saved pick.
+            foreach (var (label, flag) in AssetTypeOptions)
+            {
+                var isChecked = lastSelected == null || lastSelected.Contains(flag.ToString(), StringComparer.OrdinalIgnoreCase);
+                listBox.Items.Add(label, isChecked);
+            }
 
             // FBX export needs PNG textures to link materials to (see MeshExporter) — nudge the user
             // toward that up front rather than silently overriding their choice after the fact. This is
@@ -678,15 +692,47 @@ public static class Program
                     if (!wantDds && !wantPng)
                         return;
 
-                    // Check if output already exists in skip mode
                     var ddsPath = destBase + ".dds";
-                    if (fileMode == FileHandlingMode.SkipExisting && File.Exists(ddsPath))
+                    var pngPath = destBase + ".png";
+
+                    if (fileMode == FileHandlingMode.SkipExisting)
                     {
-                        stats.Skipped++;
-                        stats.SkippedFiles++;
-                        if (File.Exists(destBase + ".png"))
-                            stats.SkippedFiles++;
-                        return;
+                        var ddsExists = File.Exists(ddsPath);
+                        var ddsNeeded = wantDds && !ddsExists;
+                        var pngNeeded = wantPng && !File.Exists(pngPath);
+
+                        if (!ddsNeeded && !pngNeeded)
+                        {
+                            // Everything we actually want is already there.
+                            stats.Skipped++;
+                            if (wantDds) stats.SkippedFiles++;
+                            if (wantPng) stats.SkippedFiles++;
+                            return;
+                        }
+
+                        if (!ddsNeeded && pngNeeded && ddsExists)
+                        {
+                            // The DDS is already on disk (this bundle's own file, or left over from an
+                            // earlier run that only asked for DDS) and the PNG is the only thing missing —
+                            // convert straight from it instead of re-extracting and re-decoding the raw
+                            // bundle asset just to regenerate a DDS we already have.
+                            try
+                            {
+                                TextureConverter.DdsToPng(ddsPath, pngPath);
+                                stats.Textures++;
+                                stats.PngFiles++;
+                                if (wantDds)
+                                    stats.SkippedFiles++;
+                                stats.TextureMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+                            }
+                            catch (Exception ex)
+                            {
+                                RunLogger.Warn($"  (no PNG for {url}: {ex.Message})");
+                                stats.Skipped++;
+                                if (wantDds) stats.SkippedFiles++;
+                            }
+                            return;
+                        }
                     }
 
                     var rawPath = destBase + ".raw";
@@ -701,7 +747,7 @@ public static class Program
                     {
                         try
                         {
-                            TextureConverter.DdsToPng(ddsPath, destBase + ".png");
+                            TextureConverter.DdsToPng(ddsPath, pngPath);
                             pngOk = true;
                         }
                         catch (Exception ex)
