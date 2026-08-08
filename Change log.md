@@ -29,3 +29,7 @@
 
 - Added -overwrite and -skip-existing CLI flags
 - Without specifying one or the other, defaults to asking the user interactively which they prefer IF the target folder is not empty
+
+## further-improvements
+
+- now has conversion level parallelism for radically improved performance

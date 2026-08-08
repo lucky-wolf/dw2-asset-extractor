@@ -40,7 +40,7 @@ public static class TextureConverter
 
     private static string ffmpegPath = "";
 
-    private static bool FindFFmpeg()
+    public static bool FindFFmpeg()
     {
         // Check the executable's own directory first — reliable no matter how the tool was launched
         // (double-click, a shortcut with a different "Start in" folder, a script run from elsewhere).

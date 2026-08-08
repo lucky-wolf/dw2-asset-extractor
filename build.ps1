@@ -510,24 +510,29 @@ function Resolve-Dw2GameDir {
         [switch]$IgnoreExistingLocalProps
     )
 
+    # An explicit -DW2GameDir is a deliberate, one-shot instruction from the caller — use it outright
+    # rather than asking them to confirm what they just typed.
     if (Test-ValidDw2GameDir -PathValue $SuppliedPath) {
         $resolvedSuppliedPath = (Resolve-Path -LiteralPath $SuppliedPath).Path
-        if (Confirm-Dw2GameDirCandidate -PathValue $resolvedSuppliedPath -SourceLabel 'Using path from -DW2GameDir:') {
-            return $resolvedSuppliedPath
-        }
+        Write-Step "Using path from -DW2GameDir: $resolvedSuppliedPath"
+        return $resolvedSuppliedPath
     }
 
     if ($SuppliedPath) {
         Write-Warn "Provided -DW2GameDir is invalid or missing DistantWorlds2.exe: $SuppliedPath"
     }
 
+    # A DW2BT.local.props already on disk means this path was already established (confirmed on a
+    # previous run, or supplied via -DW2GameDir before) — reuse it silently instead of re-prompting on
+    # every single build. Pass -Reset to discard it and go through auto-detection + confirmation again,
+    # or -DW2GameDir <path> to point at a different install without touching the existing file.
     if (-not $IgnoreExistingLocalProps) {
         $existing = Get-Dw2GameDirFromLocalProps -LocalPropsPath $LocalPropsPath
         if (Test-ValidDw2GameDir -PathValue $existing) {
             $resolvedExistingPath = (Resolve-Path -LiteralPath $existing).Path
-            if (Confirm-Dw2GameDirCandidate -PathValue $resolvedExistingPath -SourceLabel 'Detected path from DW2BT.local.props:') {
-                return $resolvedExistingPath
-            }
+            Write-Step "Using previously detected DW2 install: $resolvedExistingPath"
+            Write-Host '(Pass -Reset to re-run auto-detection, or -DW2GameDir <path> to use a different install.)'
+            return $resolvedExistingPath
         }
     }
 

@@ -19,6 +19,11 @@ internal sealed class UserSettings
         }
     }
 
+    // Unlike DefaultMaxParallelBundles (halved above 8 cores because each bundle worker used to also do
+    // its own inline ffmpeg-spawning conversion work), this pool is now the sole knob governing
+    // CPU/ffmpeg-bound conversion concurrency, so a plain processor count is the right default.
+    private static int DefaultMaxParallelConversions => Math.Max(1, Environment.ProcessorCount);
+
     private static readonly string SettingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "dw2extract", "settings.json");
@@ -43,10 +48,12 @@ internal sealed class UserSettings
     public int? TextureFfmpegTimeoutSeconds { get; set; }
     public int? SoundFfmpegTimeoutSeconds { get; set; }
     public int? MaxParallelBundles { get; set; }
+    public int? MaxParallelConversions { get; set; }
 
     public int GetTextureFfmpegTimeoutSeconds() => ResolveTimeout(TextureFfmpegTimeoutSeconds, FfmpegTimeoutSeconds);
     public int GetSoundFfmpegTimeoutSeconds() => ResolveTimeout(SoundFfmpegTimeoutSeconds, FfmpegTimeoutSeconds);
     public int GetMaxParallelBundles() => MaxParallelBundles is > 0 ? MaxParallelBundles.Value : DefaultMaxParallelBundles;
+    public int GetMaxParallelConversions() => MaxParallelConversions is > 0 ? MaxParallelConversions.Value : DefaultMaxParallelConversions;
 
     private static int ResolveTimeout(int? specific, int? generic)
     {
@@ -82,6 +89,12 @@ internal sealed class UserSettings
         if (MaxParallelBundles is null or <= 0)
         {
             MaxParallelBundles = DefaultMaxParallelBundles;
+            changed = true;
+        }
+
+        if (MaxParallelConversions is null or <= 0)
+        {
+            MaxParallelConversions = DefaultMaxParallelConversions;
             changed = true;
         }
 
