@@ -15,6 +15,9 @@
 # Local machine configuration (points at your own DW2 install; not portable)
 DW2BT.local.props
 
+# Scratch debugging scripts, not part of the tool
+/test-ffmpeg-colors.ps1
+
 # .NET / Visual Studio build output
 [Bb]in/
 [Oo]bj/

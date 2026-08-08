@@ -24,3 +24,14 @@
 - Automatically generates dw2extractor.log file with details so you can refer back to it
 - Added -v || --verbose mode to generate extra data about parallel performance
 - Added additional summary information for the run as a whole
+
+## skip-existing
+
+- Added -overwrite and -skip-existing CLI flags
+- Without specifying one or the other, defaults to asking the user interactively which they prefer IF the target folder is not empty
+
+## further-improvements
+
+- now has conversion level parallelism for radically improved performance
+- added recreate mode that first cleans the target folder than regenerates the requested files
+- fixed ffmpeg color handling for stride bundles

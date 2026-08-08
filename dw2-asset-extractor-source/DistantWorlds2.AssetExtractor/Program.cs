@@ -25,6 +25,17 @@ public static class Program
         All = Dds | Png | Wav | Fbx | Misc,
     }
 
+    private enum FileHandlingMode
+    {
+        Unspecified,
+        Overwrite,
+        SkipExisting,
+        // Transient, resolved away before extraction starts: the output folder is wiped, then fileMode
+        // is downgraded to Overwrite (an empty folder makes Overwrite and SkipExisting equivalent anyway),
+        // so nothing downstream of that resolution step ever needs to know this value existed.
+        Recreate,
+    }
+
     private static readonly (string Label, AssetKindFlags Flag)[] AssetTypeOptions =
     [
         ("Textures - DDS (.dds)", AssetKindFlags.Dds),
@@ -59,11 +70,19 @@ public static class Program
             string? installDir = options.InstallDir;
             string? outputDir = options.OutputDir;
             string? bundleFilter = options.BundleFilter;
+            var fileMode = options.FileMode;
+            var fileModeExplicitlySet = options.FileModeExplicitlySet;
 
             var settings = UserSettings.Load();
             TextureConverter.SetFfmpegTimeoutSeconds(settings.GetTextureFfmpegTimeoutSeconds());
             SoundConverter.SetFfmpegTimeoutSeconds(settings.GetSoundFfmpegTimeoutSeconds());
+            // Resolve ffmpeg's path once, up front, rather than relying on lazy first-use discovery in
+            // TextureConverter/SoundConverter — once conversions run concurrently on the worker pool below,
+            // several threads could otherwise race through that discovery on the very first run.
+            TextureConverter.FindFFmpeg();
+            SoundConverter.FindFFmpeg();
             var maxParallelBundles = options.MaxParallelBundles ?? settings.GetMaxParallelBundles();
+            var maxParallelConversions = options.MaxParallelConversions ?? settings.GetMaxParallelConversions();
             var verbose = options.Verbose;
 
             bool interactive = installDir == null;
@@ -101,6 +120,75 @@ public static class Program
                 return 1;
             }
 
+            // Determine file handling mode: either explicitly set via CLI, or prompt/default based on folder state.
+            if (fileMode == FileHandlingMode.Unspecified)
+            {
+                var folderExists = Directory.Exists(outputDir);
+                var folderIsEmpty = !folderExists || !Directory.EnumerateFileSystemEntries(outputDir).Any();
+
+                if (!folderIsEmpty)
+                {
+                    // Folder exists and is not empty — must prompt (in interactive mode) or error (in non-interactive)
+                    if (interactive)
+                    {
+                        var pickedMode = PickFileHandlingMode();
+                        if (pickedMode is null)
+                        {
+                            RunLogger.Info("Cancelled.");
+                            return 1;
+                        }
+                        fileMode = pickedMode.Value;
+                    }
+                    else
+                    {
+                        RunLogger.Error("Output folder is not empty. Specify -overwrite, -skip-existing, or -recreate to proceed in non-interactive mode.");
+                        return 1;
+                    }
+                }
+                else
+                {
+                    // Folder is empty or doesn't exist — default to Overwrite
+                    fileMode = FileHandlingMode.Overwrite;
+                }
+            }
+
+            var recreatedOutputDir = false;
+            if (fileMode == FileHandlingMode.Recreate)
+            {
+                RunLogger.Info($"Deleting existing contents of '{outputDir}' (recreate from scratch)...");
+                if (Directory.Exists(outputDir))
+                {
+                    try
+                    {
+                        foreach (var entry in Directory.EnumerateFileSystemEntries(outputDir))
+                        {
+                            // Preserve a .gitkeep placeholder at the output root — e.g. this repo's own
+                            // Output/.gitkeep, which exists purely to keep the otherwise-empty, gitignored
+                            // folder tracked in git. Recreate shouldn't delete it out from under the repo.
+                            if (File.Exists(entry) && string.Equals(Path.GetFileName(entry), ".gitkeep", StringComparison.OrdinalIgnoreCase))
+                                continue;
+
+                            if (Directory.Exists(entry))
+                                Directory.Delete(entry, recursive: true);
+                            else
+                                File.Delete(entry);
+                        }
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        RunLogger.Error($"Could not delete '{outputDir}': {ex.Message}");
+                        RunLogger.Error("A file or folder inside it is likely open in Explorer, an editor, or another running instance of this tool. Close whatever has it open and try again.");
+                        return 1;
+                    }
+                }
+                else
+                {
+                    Directory.CreateDirectory(outputDir);
+                }
+                fileMode = FileHandlingMode.Overwrite;
+                recreatedOutputDir = true;
+            }
+
             var bundlesDir = Path.Combine(installDir, "data", "db", "bundles");
             if (!Directory.Exists(bundlesDir))
             {
@@ -131,13 +219,14 @@ public static class Program
             }
             else
             {
-                var picked = PickBundles(allBundles);
+                var picked = PickBundles(allBundles, settings.LastSelectedBundles);
                 if (picked == null || picked.Count == 0)
                 {
                     RunLogger.Info("Cancelled.");
                     return 1;
                 }
                 selectedBundles = picked;
+                settings.LastSelectedBundles = picked.Count == allBundles.Count ? null : picked;
             }
 
             AssetKindFlags assetTypes;
@@ -147,13 +236,16 @@ public static class Program
             }
             else
             {
-                var pickedTypes = PickAssetTypes();
+                var pickedTypes = PickAssetTypes(settings.LastSelectedAssetTypes);
                 if (pickedTypes is null or AssetKindFlags.None)
                 {
                     RunLogger.Info("Cancelled.");
                     return 1;
                 }
                 assetTypes = pickedTypes.Value;
+                settings.LastSelectedAssetTypes = assetTypes == AssetKindFlags.All
+                    ? null
+                    : AssetTypeOptions.Where(o => assetTypes.HasFlag(o.Flag)).Select(o => o.Flag.ToString()).ToList();
             }
 
             if (assetTypes.HasFlag(AssetKindFlags.Fbx))
@@ -171,12 +263,25 @@ public static class Program
             RunLogger.Info($"Output:    {outputDir}");
             RunLogger.Info($"Bundles:   {selectedBundles.Count} of {allBundles.Count} selected");
             RunLogger.Info($"Types:     {string.Join(", ", AssetTypeOptions.Where(o => assetTypes.HasFlag(o.Flag)).Select(o => o.Label))}");
-            RunLogger.Info($"Parallel:  {maxParallelBundles} bundle worker(s)");
+            RunLogger.Info($"Parallel:  {maxParallelBundles} bundle worker(s), {maxParallelConversions} conversion worker(s)");
+            var fileModeLabel = fileMode == FileHandlingMode.Overwrite ? (recreatedOutputDir ? "overwrite (recreated from scratch)" : "overwrite")
+                : fileMode == FileHandlingMode.SkipExisting ? "skip existing"
+                : "unspecified";
+            RunLogger.Info($"File Mode: {fileModeLabel}");
             if (verbose)
                 RunLogger.Info("Verbose:   enabled");
             RunLogger.Info(string.Empty);
 
-            return await Extract(installDir, outputDir, selectedBundles, assetTypes, maxParallelBundles, verbose);
+            return await Extract(installDir, outputDir, selectedBundles, assetTypes, maxParallelBundles, maxParallelConversions, verbose, fileMode);
+        }
+        catch (Exception ex)
+        {
+            // Last-resort catch-all: everything else in this file that can reasonably fail already
+            // handles it locally (per-asset failures land in Stats.FailureDetails, not here). This exists
+            // so a truly unexpected failure still exits cleanly with a one-line message instead of the
+            // .NET runtime dumping a raw stack trace to the console.
+            RunLogger.Error($"Unexpected error: {ex.Message}");
+            return 1;
         }
         finally
         {
@@ -190,14 +295,20 @@ public static class Program
         public string? OutputDir { get; init; }
         public string? BundleFilter { get; init; }
         public int? MaxParallelBundles { get; init; }
+        public int? MaxParallelConversions { get; init; }
         public bool Verbose { get; init; }
+        public FileHandlingMode FileMode { get; init; } = FileHandlingMode.Unspecified;
+        public bool FileModeExplicitlySet { get; init; }
     }
 
     private static CommandLineOptions ParseArgs(string[] args)
     {
         var positional = new List<string>();
         int? maxParallelBundles = null;
+        int? maxParallelConversions = null;
         var verbose = false;
+        var fileMode = FileHandlingMode.Unspecified;
+        var fileModeExplicitlySet = false;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -210,9 +321,38 @@ public static class Program
                 continue;
             }
 
+            if (arg is "--max-parallel-conversions")
+            {
+                if (i + 1 >= args.Length || !int.TryParse(args[++i], out var parsed) || parsed <= 0)
+                    throw new ArgumentException($"{arg} requires a positive integer value.");
+                maxParallelConversions = parsed;
+                continue;
+            }
+
             if (arg is "-v" or "--verbose")
             {
                 verbose = true;
+                continue;
+            }
+
+            if (arg is "-overwrite")
+            {
+                fileMode = FileHandlingMode.Overwrite;
+                fileModeExplicitlySet = true;
+                continue;
+            }
+
+            if (arg is "-skip-existing")
+            {
+                fileMode = FileHandlingMode.SkipExisting;
+                fileModeExplicitlySet = true;
+                continue;
+            }
+
+            if (arg is "-recreate")
+            {
+                fileMode = FileHandlingMode.Recreate;
+                fileModeExplicitlySet = true;
                 continue;
             }
 
@@ -220,7 +360,7 @@ public static class Program
         }
 
         if (positional.Count != 0 && positional.Count != 2 && positional.Count != 3)
-            throw new ArgumentException("Usage: dw2extract.exe [<installDir> <outputDir> [bundleNameFilter]] [-j <count>] [-v]");
+            throw new ArgumentException("Usage: dw2extract.exe [<installDir> <outputDir> [bundleNameFilter]] [-overwrite | -skip-existing | -recreate] [-j <count>] [--max-parallel-conversions <count>] [-v]");
 
         return new CommandLineOptions
         {
@@ -228,7 +368,10 @@ public static class Program
             OutputDir = positional.Count >= 2 ? positional[1] : null,
             BundleFilter = positional.Count == 3 ? positional[2] : null,
             MaxParallelBundles = maxParallelBundles,
+            MaxParallelConversions = maxParallelConversions,
             Verbose = verbose,
+            FileMode = fileMode,
+            FileModeExplicitlySet = fileModeExplicitlySet,
         };
     }
 
@@ -279,7 +422,7 @@ public static class Program
         return result;
     }
 
-    private static List<string>? PickBundles(List<string> allBundles)
+    private static List<string>? PickBundles(List<string> allBundles, List<string>? lastSelected)
     {
         List<string>? result = null;
         var thread = new Thread(() =>
@@ -304,8 +447,13 @@ public static class Program
                 CheckOnClick = true,
                 IntegralHeight = false,
             };
+            // null lastSelected means "all" (either never picked before, or last pick was everything) —
+            // default every item checked in that case rather than treating it as an empty saved pick.
             foreach (var bundleName in allBundles)
-                listBox.Items.Add(bundleName, true);
+            {
+                var isChecked = lastSelected == null || lastSelected.Contains(bundleName, StringComparer.OrdinalIgnoreCase);
+                listBox.Items.Add(bundleName, isChecked);
+            }
 
             var selectAllButton = new Button { Text = "All", Left = 10, Top = 432, Width = 90, Height = 36 };
             selectAllButton.Click += (_, _) =>
@@ -341,7 +489,7 @@ public static class Program
         return result;
     }
 
-    private static AssetKindFlags? PickAssetTypes()
+    private static AssetKindFlags? PickAssetTypes(List<string>? lastSelected)
     {
         AssetKindFlags? result = null;
         var thread = new Thread(() =>
@@ -366,8 +514,13 @@ public static class Program
                 CheckOnClick = true,
                 IntegralHeight = false,
             };
-            foreach (var (label, _) in AssetTypeOptions)
-                listBox.Items.Add(label, true);
+            // null lastSelected means "all" (either never picked before, or last pick was everything) —
+            // default every item checked in that case rather than treating it as an empty saved pick.
+            foreach (var (label, flag) in AssetTypeOptions)
+            {
+                var isChecked = lastSelected == null || lastSelected.Contains(flag.ToString(), StringComparer.OrdinalIgnoreCase);
+                listBox.Items.Add(label, isChecked);
+            }
 
             // FBX export needs PNG textures to link materials to (see MeshExporter) — nudge the user
             // toward that up front rather than silently overriding their choice after the fact. This is
@@ -421,7 +574,66 @@ public static class Program
         return result;
     }
 
-    private static async Task<int> Extract(string installDir, string outputDir, List<string> selectedBundles, AssetKindFlags assetTypes, int maxParallelBundles, bool verbose)
+    private static FileHandlingMode? PickFileHandlingMode()
+    {
+        FileHandlingMode? result = null;
+        var thread = new Thread(() =>
+        {
+            using var form = new Form
+            {
+                Text = "Output folder is not empty",
+                StartPosition = FormStartPosition.CenterScreen,
+                Width = 580,
+                Height = 260,
+                MinimizeBox = false,
+                MaximizeBox = false,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+            };
+
+            var label = new Label
+            {
+                Text = "The output folder already contains files. Choose how to handle them:",
+                Left = 10,
+                Top = 10,
+                AutoSize = true,
+            };
+
+            // Skip existing is the least destructive choice, so it's the one pre-selected — same
+            // "safe by default" intent as the old MessageBox defaulting its Enter key to Cancel.
+            // AutoSize (rather than a fixed Width) avoids clipping the longer labels below — a fixed
+            // pixel width that looks fine at design time can still clip at a different system font size
+            // or DPI scale, since RadioButton doesn't wrap text within its bounds by default.
+            var skipRadio = new RadioButton { Text = "Skip existing — leave already-extracted files alone", Left = 10, Top = 55, AutoSize = true, Checked = true };
+            var overwriteRadio = new RadioButton { Text = "Overwrite existing — replace files that already exist", Left = 10, Top = 82, AutoSize = true };
+            var recreateRadio = new RadioButton { Text = "Recreate from scratch — DELETES everything in the output folder first", Left = 10, Top = 109, AutoSize = true };
+
+            var okButton = new Button { Text = "OK", Left = 380, Top = 155, Width = 80, Height = 36, DialogResult = DialogResult.OK };
+            var cancelButton = new Button { Text = "Cancel", Left = 465, Top = 155, Width = 85, Height = 36, DialogResult = DialogResult.Cancel };
+
+            form.Controls.Add(label);
+            form.Controls.Add(skipRadio);
+            form.Controls.Add(overwriteRadio);
+            form.Controls.Add(recreateRadio);
+            form.Controls.Add(okButton);
+            form.Controls.Add(cancelButton);
+            form.AcceptButton = okButton;
+            form.CancelButton = cancelButton;
+
+            if (form.ShowDialog() == DialogResult.OK)
+            {
+                result = recreateRadio.Checked ? FileHandlingMode.Recreate
+                    : overwriteRadio.Checked ? FileHandlingMode.Overwrite
+                    : FileHandlingMode.SkipExisting;
+            }
+            // Cancel -> result stays null
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        return result;
+    }
+
+    private static async Task<int> Extract(string installDir, string outputDir, List<string> selectedBundles, AssetKindFlags assetTypes, int maxParallelBundles, int maxParallelConversions, bool verbose, FileHandlingMode fileMode)
     {
         VirtualFileSystem.MountFileSystem(VfsRoot, installDir); // Xenko-side (bundle container plumbing)
         Stride.Core.IO.VirtualFileSystem.MountFileSystem(VfsRoot, installDir); // Stride-side (MeshExporter's ContentManager)
@@ -439,6 +651,11 @@ public static class Program
         var activeBundles = 0;
         var maxObservedConcurrentBundles = 0;
         var totalStopwatch = Stopwatch.StartNew();
+        // Shared across every bundle, not one pool per bundle — bundles already run up to maxParallelBundles
+        // at once, so a per-bundle pool would multiply out to maxParallelBundles * maxParallelConversions
+        // concurrent ffmpeg processes. This single pool keeps total conversion concurrency bounded regardless
+        // of how many bundles happen to be running.
+        using var conversionPool = new ConversionPool(maxParallelConversions);
 
         await Parallel.ForEachAsync(
             selectedBundles,
@@ -451,7 +668,7 @@ public static class Program
                 if (verbose)
                     RunLogger.Info($"[bundle-start] {bundleName} active={currentActive}/{maxParallelBundles}");
 
-                var bundleStats = await ExtractBundle(bundleName, outputDir, assetTypes);
+                var bundleStats = await ExtractBundle(bundleName, outputDir, assetTypes, fileMode, conversionPool);
                 lock (statsLock)
                 {
                     stats.MergeFrom(bundleStats);
@@ -463,15 +680,23 @@ public static class Program
             });
 
         var successfulAssets = stats.Textures + stats.Sounds + stats.Meshes + stats.Raw;
-        var attemptedAssets = successfulAssets + stats.Failures;
+        var attemptedAssets = successfulAssets + stats.Failures + stats.Skipped;
 
         RunLogger.Info(string.Empty);
-        RunLogger.Info($"Done. {successfulAssets} assets succeeded, {stats.Failures} failed, {attemptedAssets} total attempted.");
+        if (stats.Skipped > 0)
+            RunLogger.Info($"Done. {successfulAssets} assets succeeded, {stats.Skipped} skipped, {stats.Failures} failed, {attemptedAssets} total attempted.");
+        else
+            RunLogger.Info($"Done. {successfulAssets} assets succeeded, {stats.Failures} failed, {attemptedAssets} total attempted.");
         RunLogger.Info($"Successful assets by type: {stats.Textures} textures, {stats.Sounds} sounds, {stats.Meshes} meshes, {stats.Raw} other.");
         RunLogger.Info($"Output files created: {stats.DdsFiles} dds, {stats.PngFiles} png, {stats.WavFiles} wav, {stats.FbxFiles} fbx, {stats.OtherFiles} other.");
+        if (stats.SkippedFiles > 0)
+            RunLogger.Info($"Output files skipped: {stats.SkippedFiles} (due to skip-existing mode).");
         RunLogger.Info($"Average time per successful asset: textures {stats.GetAverageMilliseconds(stats.TextureMilliseconds, stats.Textures):0.0} ms, sounds {stats.GetAverageMilliseconds(stats.SoundMilliseconds, stats.Sounds):0.0} ms, meshes {stats.GetAverageMilliseconds(stats.MeshMilliseconds, stats.Meshes):0.0} ms, other {stats.GetAverageMilliseconds(stats.RawMilliseconds, stats.Raw):0.0} ms.");
         if (verbose)
+        {
             RunLogger.Info($"Parallel efficacy: max concurrent bundles observed {maxObservedConcurrentBundles}/{maxParallelBundles}, total elapsed {totalStopwatch.Elapsed:hh\\:mm\\:ss}.");
+            RunLogger.Info($"Conversion efficacy: max concurrent conversions observed {conversionPool.MaxObservedActive}/{maxParallelConversions}.");
+        }
 
         if (stats.Failures > 0)
         {
@@ -496,7 +721,15 @@ public static class Program
         }
     }
 
-    private static async Task<Stats> ExtractBundle(string bundleName, string outputDir, AssetKindFlags assetTypes)
+    private static bool ShouldWriteFile(string destPath, FileHandlingMode fileMode)
+    {
+        if (fileMode == FileHandlingMode.Overwrite)
+            return true;
+        // SkipExisting: only write if file doesn't exist
+        return !File.Exists(destPath);
+    }
+
+    private static async Task<Stats> ExtractBundle(string bundleName, string outputDir, AssetKindFlags assetTypes, FileHandlingMode fileMode, ConversionPool conversionPool)
     {
         var stats = new Stats();
 
@@ -531,6 +764,14 @@ public static class Program
 
         var totalAssets = ownAssetUrls.Count(url => !url.EndsWith("_Data", StringComparison.Ordinal) && !url.EndsWith("/path", StringComparison.Ordinal));
         var processedAssets = 0;
+        // Conversion (dds/png/wav/fbx encode) is pure file-in/file-out once the raw bytes are on disk, so it's
+        // scheduled onto the shared ConversionPool instead of running inline — the loop below only has to wait
+        // for the raw extraction itself (which does need the shared odb/fileProvider and can't be parallelized)
+        // before moving on to the next asset. "processed" in the progress log below therefore means "read from
+        // the bundle", not "fully converted" — conversions for earlier assets may still be finishing in the
+        // background. Each conversion task returns its own Stats delta, merged into the bundle's stats only
+        // after every one of them completes, so there's no concurrent writer to `stats` at any point.
+        var pendingConversions = new List<Task<Stats>>();
 
         using (odb)
         {
@@ -541,7 +782,7 @@ public static class Program
                 if (url.EndsWith("_Data", StringComparison.Ordinal) || url.EndsWith("/path", StringComparison.Ordinal))
                     continue;
 
-                await ExtractOne(odb, fileProvider, bundleName, url, outputDir, assetTypes, stats);
+                await ExtractOne(odb, fileProvider, bundleName, url, outputDir, assetTypes, fileMode, stats, conversionPool, pendingConversions);
                 processedAssets++;
 
                 if (processedAssets == totalAssets || processedAssets % BundleProgressLogInterval == 0)
@@ -549,10 +790,17 @@ public static class Program
             }
         }
 
+        foreach (var delta in await Task.WhenAll(pendingConversions))
+            stats.MergeFrom(delta);
+
         return stats;
     }
 
-    private static async Task ExtractOne(ObjectDatabase odb, DatabaseFileProvider fileProvider, string bundleName, string url, string outputDir, AssetKindFlags assetTypes, Stats stats)
+    // Only the parts that need the shared, non-thread-safe per-bundle odb/fileProvider run here — probing,
+    // classification, skip-existing checks, and BundleExtractor.ExtractRaw. Everything after the raw bytes
+    // are on disk (DDS/PNG/WAV encode, FBX export) is pure file-in/file-out, so it's handed to the shared
+    // ConversionPool instead of running inline, letting the next asset's raw extraction start immediately.
+    private static async Task ExtractOne(ObjectDatabase odb, DatabaseFileProvider fileProvider, string bundleName, string url, string outputDir, AssetKindFlags assetTypes, FileHandlingMode fileMode, Stats stats, ConversionPool conversionPool, List<Task<Stats>> pendingConversions)
     {
         var destBase = Path.Combine(outputDir, bundleName, AssetUrlPaths.Sanitize(url));
         var startedAt = Stopwatch.GetTimestamp();
@@ -576,41 +824,43 @@ public static class Program
                     if (!wantDds && !wantPng)
                         return;
 
-                    var rawPath = destBase + ".raw";
-                    if (!await BundleExtractor.ExtractRaw(odb, fileProvider, url, rawPath))
-                        throw new IOException("extract failed");
-                    TextureConverter.XenkoToDds(rawPath, destBase + ".dds");
-                    CleanupRaw(rawPath);
-                    File.Delete(destBase + ".dds.refs");
+                    var ddsPath = destBase + ".dds";
+                    var pngPath = destBase + ".png";
 
-                    var pngOk = false;
-                    if (wantPng)
+                    if (fileMode == FileHandlingMode.SkipExisting)
                     {
-                        try
+                        var ddsExists = File.Exists(ddsPath);
+                        var ddsNeeded = wantDds && !ddsExists;
+                        var pngNeeded = wantPng && !File.Exists(pngPath);
+
+                        if (!ddsNeeded && !pngNeeded)
                         {
-                            TextureConverter.DdsToPng(destBase + ".dds", destBase + ".png");
-                            pngOk = true;
+                            // Everything we actually want is already there.
+                            stats.Skipped++;
+                            if (wantDds) stats.SkippedFiles++;
+                            if (wantPng) stats.SkippedFiles++;
+                            return;
                         }
-                        catch (Exception ex)
+
+                        if (!ddsNeeded && pngNeeded && ddsExists)
                         {
-                            // Some DDS variants (e.g. certain cubemap/array layouts) may not have a PNG-savable
-                            // path in Xenko's Image.Save — the .dds itself already succeeded, so don't fail the
-                            // whole asset over a missing PNG. Since PNG conversion failed, keep the .dds around
-                            // regardless of whether the user asked for it, so the asset isn't lost entirely.
-                            RunLogger.Warn($"  (no PNG for {url}: {ex.Message})");
+                            // The DDS is already on disk (this bundle's own file, or left over from an
+                            // earlier run that only asked for DDS) and the PNG is the only thing missing —
+                            // convert straight from it instead of re-extracting and re-decoding the raw
+                            // bundle asset just to regenerate a DDS we already have.
+                            pendingConversions.Add(conversionPool.Schedule(() =>
+                                Task.FromResult(ConvertExistingDdsToPng(ddsPath, pngPath, wantDds, url, startedAt))));
+                            return;
                         }
                     }
 
-                    if (!wantDds && pngOk)
-                        File.Delete(destBase + ".dds");
+                    var rawPath = destBase + ".raw";
+                    if (!await BundleExtractor.ExtractRaw(odb, fileProvider, url, rawPath))
+                        throw new IOException("extract failed");
 
-                    stats.Textures++;
-                    if (wantDds || !pngOk)
-                        stats.DdsFiles++;
-                    if (pngOk)
-                        stats.PngFiles++;
-                    stats.TextureMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
-                    break;
+                    pendingConversions.Add(conversionPool.Schedule(() =>
+                        Task.FromResult(ConvertTexture(rawPath, ddsPath, pngPath, wantDds, wantPng, bundleName, url, startedAt))));
+                    return;
                 }
 
                 case DW2AssetKind.Sound:
@@ -618,36 +868,71 @@ public static class Program
                     if (!assetTypes.HasFlag(AssetKindFlags.Wav))
                         return;
 
+                    // Check if output already exists in skip mode
+                    var wavPath = destBase + ".wav";
+                    if (fileMode == FileHandlingMode.SkipExisting && File.Exists(wavPath))
+                    {
+                        stats.Skipped++;
+                        stats.SkippedFiles++;
+                        return;
+                    }
+
                     var rawPath = destBase + ".raw";
                     if (!await BundleExtractor.ExtractRaw(odb, fileProvider, url, rawPath))
                         throw new IOException("extract failed");
-                    SoundConverter.XenkoToSoundfile(rawPath, destBase + ".wav");
-                    CleanupRaw(rawPath);
-                    stats.Sounds++;
-                    stats.WavFiles++;
-                    stats.SoundMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
-                    break;
+
+                    pendingConversions.Add(conversionPool.Schedule(() =>
+                        Task.FromResult(ConvertSound(rawPath, wavPath, bundleName, url, startedAt))));
+                    return;
                 }
 
                 case DW2AssetKind.Model:
+                {
                     if (!assetTypes.HasFlag(AssetKindFlags.Fbx))
                         return;
-                    await MeshExporter.ExportToFbx(bundleName, url, destBase + ".fbx", outputDir, VfsRoot);
-                    stats.Meshes++;
-                    stats.FbxFiles++;
-                    stats.MeshMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
-                    break;
+
+                    // Check if output already exists in skip mode
+                    var fbxPath = destBase + ".fbx";
+                    if (fileMode == FileHandlingMode.SkipExisting && File.Exists(fbxPath))
+                    {
+                        stats.Skipped++;
+                        stats.SkippedFiles++;
+                        return;
+                    }
+
+                    // MeshExporter.ExportToFbx builds its own independent ObjectDatabase/DatabaseFileProvider
+                    // internally — it never touches this bundle's shared odb/fileProvider — so there's no
+                    // "prepare" step needed here at all beyond the skip-existing check above.
+                    pendingConversions.Add(conversionPool.Schedule(() => ConvertModel(bundleName, url, fbxPath, outputDir, startedAt)));
+                    return;
+                }
 
                 case DW2AssetKind.RawOrUnknown:
                 default:
                     if (!assetTypes.HasFlag(AssetKindFlags.Misc))
                         return;
+
+                    // Check if output already exists in skip mode
+                    if (fileMode == FileHandlingMode.SkipExisting && (File.Exists(destBase) || File.Exists(destBase + "_Data")))
+                    {
+                        stats.Skipped++;
+                        var count = 0;
+                        if (File.Exists(destBase))
+                            count++;
+                        if (File.Exists(destBase + "_Data"))
+                            count++;
+                        stats.SkippedFiles += count;
+                        return;
+                    }
+
+                    // The raw copy IS the entire operation for this kind — nothing to hand off to the
+                    // conversion pool.
                     if (!await BundleExtractor.ExtractRaw(odb, fileProvider, url, destBase))
                         throw new IOException("extract failed");
                     stats.Raw++;
                     stats.OtherFiles += CountRawOutputFiles(destBase);
                     stats.RawMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
-                    break;
+                    return;
             }
         }
         catch (Exception ex)
@@ -656,6 +941,119 @@ public static class Program
             stats.FailureDetails.Add($"{bundleName}:{url} -> {ex.Message}");
             RunLogger.Error($"  FAILED {url}: {ex.Message}");
         }
+    }
+
+    // The DDS is already on disk (skip-existing shortcut) — only the PNG needs to be produced.
+    private static Stats ConvertExistingDdsToPng(string ddsPath, string pngPath, bool wantDds, string url, long startedAt)
+    {
+        var stats = new Stats();
+        try
+        {
+            TextureConverter.DdsToPng(ddsPath, pngPath);
+            stats.Textures++;
+            stats.PngFiles++;
+            if (wantDds)
+                stats.SkippedFiles++;
+            stats.TextureMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+        }
+        catch (Exception ex)
+        {
+            RunLogger.Warn($"  (no PNG for {url}: {ex.Message})");
+            stats.Skipped++;
+            if (wantDds) stats.SkippedFiles++;
+        }
+        return stats;
+    }
+
+    private static Stats ConvertTexture(string rawPath, string ddsPath, string pngPath, bool wantDds, bool wantPng, string bundleName, string url, long startedAt)
+    {
+        var stats = new Stats();
+        try
+        {
+            TextureConverter.XenkoToDds(rawPath, ddsPath);
+            CleanupRaw(rawPath);
+            File.Delete(ddsPath + ".refs");
+
+            var pngOk = false;
+            if (wantPng)
+            {
+                try
+                {
+                    TextureConverter.DdsToPng(ddsPath, pngPath);
+                    pngOk = true;
+                }
+                catch (Exception ex)
+                {
+                    // Some DDS variants (e.g. certain cubemap/array layouts) may not have a PNG-savable
+                    // path in Xenko's Image.Save — the .dds itself already succeeded, so don't fail the
+                    // whole asset over a missing PNG. Since PNG conversion failed, keep the .dds around
+                    // regardless of whether the user asked for it, so the asset isn't lost entirely.
+                    RunLogger.Warn($"  (no PNG for {url}: {ex.Message})");
+                }
+            }
+
+            if (!wantDds && pngOk)
+                File.Delete(ddsPath);
+
+            stats.Textures++;
+            if (wantDds || !pngOk)
+                stats.DdsFiles++;
+            if (pngOk)
+                stats.PngFiles++;
+            stats.TextureMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+        }
+        catch (Exception ex)
+        {
+            stats.Failures++;
+            stats.FailureDetails.Add($"{bundleName}:{url} -> {ex.Message}");
+            RunLogger.Error($"  FAILED {url}: {ex.Message}");
+        }
+        return stats;
+    }
+
+    private static Stats ConvertSound(string rawPath, string wavPath, string bundleName, string url, long startedAt)
+    {
+        var stats = new Stats();
+        try
+        {
+            SoundConverter.XenkoToSoundfile(rawPath, wavPath);
+            CleanupRaw(rawPath);
+            stats.Sounds++;
+            stats.WavFiles++;
+            stats.SoundMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+        }
+        catch (Exception ex)
+        {
+            stats.Failures++;
+            stats.FailureDetails.Add($"{bundleName}:{url} -> {ex.Message}");
+            RunLogger.Error($"  FAILED {url}: {ex.Message}");
+        }
+        return stats;
+    }
+
+    private static async Task<Stats> ConvertModel(string bundleName, string url, string fbxPath, string outputDir, long startedAt)
+    {
+        var stats = new Stats();
+        try
+        {
+            // ExportToFbx returns 0 on success, 1 on failure (e.g. model load failure) — previously this
+            // return value was discarded here, so a failed export was logged as an error but still counted
+            // as a successful mesh in the stats. Throwing on non-zero routes it into the normal failure path.
+            var result = await MeshExporter.ExportToFbx(bundleName, url, fbxPath, outputDir, VfsRoot);
+            if (result != 0)
+                throw new InvalidOperationException($"MeshExporter.ExportToFbx failed (exit code {result})");
+
+            stats.Meshes++;
+            stats.FbxFiles++;
+            stats.MeshMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+        }
+        catch (Exception ex)
+        {
+            stats.Failures++;
+            stats.FailureDetails.Add($"{bundleName}:{url} -> {ex.Message}");
+            RunLogger.Error($"  FAILED {url}: {ex.Message}");
+        }
+        return stats;
     }
 
     private static void CleanupRaw(string rawPath)
@@ -675,10 +1073,50 @@ public static class Program
         return count;
     }
 
+    // Bounded, process-wide pool for post-extraction conversion work (DDS/PNG/WAV encode, FBX export),
+    // shared across every bundle rather than one pool per bundle — bundles already run concurrently via
+    // Parallel.ForEachAsync in Extract(), so a per-bundle pool would multiply out to
+    // maxParallelBundles * maxParallelConversions concurrent ffmpeg processes. A single shared pool keeps
+    // total conversion concurrency bounded regardless of how many bundles are active at once.
+    private sealed class ConversionPool : IDisposable
+    {
+        private readonly SemaphoreSlim semaphore;
+        private int activeCount;
+        private int maxObservedActive;
+
+        public ConversionPool(int maxDegreeOfParallelism)
+        {
+            semaphore = new SemaphoreSlim(maxDegreeOfParallelism, maxDegreeOfParallelism);
+        }
+
+        public int MaxObservedActive => maxObservedActive;
+
+        public Task<Stats> Schedule(Func<Task<Stats>> convert)
+        {
+            return Task.Run(async () =>
+            {
+                await semaphore.WaitAsync();
+                var current = Interlocked.Increment(ref activeCount);
+                UpdateMaxObserved(ref maxObservedActive, current);
+                try
+                {
+                    return await convert();
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref activeCount);
+                    semaphore.Release();
+                }
+            });
+        }
+
+        public void Dispose() => semaphore.Dispose();
+    }
+
     private class Stats
     {
-        public int Textures, Sounds, Meshes, Raw, Failures;
-        public int DdsFiles, PngFiles, WavFiles, FbxFiles, OtherFiles;
+        public int Textures, Sounds, Meshes, Raw, Failures, Skipped;
+        public int DdsFiles, PngFiles, WavFiles, FbxFiles, OtherFiles, SkippedFiles;
         public double TextureMilliseconds, SoundMilliseconds, MeshMilliseconds, RawMilliseconds;
         public List<string> FailureDetails { get; } = [];
         public int SuccessfulAssets => Textures + Sounds + Meshes + Raw;
@@ -690,11 +1128,13 @@ public static class Program
             Meshes += other.Meshes;
             Raw += other.Raw;
             Failures += other.Failures;
+            Skipped += other.Skipped;
             DdsFiles += other.DdsFiles;
             PngFiles += other.PngFiles;
             WavFiles += other.WavFiles;
             FbxFiles += other.FbxFiles;
             OtherFiles += other.OtherFiles;
+            SkippedFiles += other.SkippedFiles;
             TextureMilliseconds += other.TextureMilliseconds;
             SoundMilliseconds += other.SoundMilliseconds;
             MeshMilliseconds += other.MeshMilliseconds;

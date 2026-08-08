@@ -2,9 +2,9 @@ using System.Text.Json;
 
 namespace DistantWorlds2.AssetExtractor;
 
-// Remembers the last-used install/output folders so the user isn't forced to re-browse for them on
-// every run. Deliberately does NOT remember bundle/asset-type selections — those are expected to vary
-// run to run, unlike the two folders which are typically the same every time for a given user.
+// Remembers the last-used install/output folders, and the last bundle selection, so the user isn't
+// forced to re-pick them on every run. Deliberately does NOT remember asset-type selections — those
+// are expected to vary run to run more than bundle picks do.
 internal sealed class UserSettings
 {
     private const int DefaultFfmpegTimeoutSeconds = 300;
@@ -19,12 +19,27 @@ internal sealed class UserSettings
         }
     }
 
+    // Unlike DefaultMaxParallelBundles (halved above 8 cores because each bundle worker used to also do
+    // its own inline ffmpeg-spawning conversion work), this pool is now the sole knob governing
+    // CPU/ffmpeg-bound conversion concurrency, so a plain processor count is the right default.
+    private static int DefaultMaxParallelConversions => Math.Max(1, Environment.ProcessorCount);
+
     private static readonly string SettingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "dw2extract", "settings.json");
 
     public string? InstallDir { get; set; }
     public string? OutputDir { get; set; }
+
+    // Null means "all bundles" — either nothing has been picked yet, or the user's last pick covered
+    // every bundle. Only an actual partial pick gets stored as an explicit list, so a full DW2 update
+    // that adds new bundles doesn't leave them silently unchecked next run.
+    public List<string>? LastSelectedBundles { get; set; }
+
+    // Same null-means-"all" convention as LastSelectedBundles. Stored as Program.AssetKindFlags flag
+    // names (e.g. "Dds", "Png") rather than the enum itself, so this settings type stays decoupled from
+    // Program's internal enum.
+    public List<string>? LastSelectedAssetTypes { get; set; }
 
     // Generic default timeout for external ffmpeg process calls.
     public int? FfmpegTimeoutSeconds { get; set; }
@@ -33,10 +48,12 @@ internal sealed class UserSettings
     public int? TextureFfmpegTimeoutSeconds { get; set; }
     public int? SoundFfmpegTimeoutSeconds { get; set; }
     public int? MaxParallelBundles { get; set; }
+    public int? MaxParallelConversions { get; set; }
 
     public int GetTextureFfmpegTimeoutSeconds() => ResolveTimeout(TextureFfmpegTimeoutSeconds, FfmpegTimeoutSeconds);
     public int GetSoundFfmpegTimeoutSeconds() => ResolveTimeout(SoundFfmpegTimeoutSeconds, FfmpegTimeoutSeconds);
     public int GetMaxParallelBundles() => MaxParallelBundles is > 0 ? MaxParallelBundles.Value : DefaultMaxParallelBundles;
+    public int GetMaxParallelConversions() => MaxParallelConversions is > 0 ? MaxParallelConversions.Value : DefaultMaxParallelConversions;
 
     private static int ResolveTimeout(int? specific, int? generic)
     {
@@ -72,6 +89,12 @@ internal sealed class UserSettings
         if (MaxParallelBundles is null or <= 0)
         {
             MaxParallelBundles = DefaultMaxParallelBundles;
+            changed = true;
+        }
+
+        if (MaxParallelConversions is null or <= 0)
+        {
+            MaxParallelConversions = DefaultMaxParallelConversions;
             changed = true;
         }
 
