@@ -33,3 +33,4 @@
 ## further-improvements
 
 - now has conversion level parallelism for radically improved performance
+- added recreate mode that first cleans the target folder than regenerates the requested files

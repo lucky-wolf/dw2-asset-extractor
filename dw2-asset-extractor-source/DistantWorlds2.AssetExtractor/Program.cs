@@ -30,6 +30,10 @@ public static class Program
         Unspecified,
         Overwrite,
         SkipExisting,
+        // Transient, resolved away before extraction starts: the output folder is wiped, then fileMode
+        // is downgraded to Overwrite (an empty folder makes Overwrite and SkipExisting equivalent anyway),
+        // so nothing downstream of that resolution step ever needs to know this value existed.
+        Recreate,
     }
 
     private static readonly (string Label, AssetKindFlags Flag)[] AssetTypeOptions =
@@ -137,7 +141,7 @@ public static class Program
                     }
                     else
                     {
-                        RunLogger.Error("Output folder is not empty. Specify -overwrite or -skip-existing to proceed in non-interactive mode.");
+                        RunLogger.Error("Output folder is not empty. Specify -overwrite, -skip-existing, or -recreate to proceed in non-interactive mode.");
                         return 1;
                     }
                 }
@@ -146,6 +150,43 @@ public static class Program
                     // Folder is empty or doesn't exist — default to Overwrite
                     fileMode = FileHandlingMode.Overwrite;
                 }
+            }
+
+            var recreatedOutputDir = false;
+            if (fileMode == FileHandlingMode.Recreate)
+            {
+                RunLogger.Info($"Deleting existing contents of '{outputDir}' (recreate from scratch)...");
+                if (Directory.Exists(outputDir))
+                {
+                    try
+                    {
+                        foreach (var entry in Directory.EnumerateFileSystemEntries(outputDir))
+                        {
+                            // Preserve a .gitkeep placeholder at the output root — e.g. this repo's own
+                            // Output/.gitkeep, which exists purely to keep the otherwise-empty, gitignored
+                            // folder tracked in git. Recreate shouldn't delete it out from under the repo.
+                            if (File.Exists(entry) && string.Equals(Path.GetFileName(entry), ".gitkeep", StringComparison.OrdinalIgnoreCase))
+                                continue;
+
+                            if (Directory.Exists(entry))
+                                Directory.Delete(entry, recursive: true);
+                            else
+                                File.Delete(entry);
+                        }
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        RunLogger.Error($"Could not delete '{outputDir}': {ex.Message}");
+                        RunLogger.Error("A file or folder inside it is likely open in Explorer, an editor, or another running instance of this tool. Close whatever has it open and try again.");
+                        return 1;
+                    }
+                }
+                else
+                {
+                    Directory.CreateDirectory(outputDir);
+                }
+                fileMode = FileHandlingMode.Overwrite;
+                recreatedOutputDir = true;
             }
 
             var bundlesDir = Path.Combine(installDir, "data", "db", "bundles");
@@ -223,12 +264,24 @@ public static class Program
             RunLogger.Info($"Bundles:   {selectedBundles.Count} of {allBundles.Count} selected");
             RunLogger.Info($"Types:     {string.Join(", ", AssetTypeOptions.Where(o => assetTypes.HasFlag(o.Flag)).Select(o => o.Label))}");
             RunLogger.Info($"Parallel:  {maxParallelBundles} bundle worker(s), {maxParallelConversions} conversion worker(s)");
-            RunLogger.Info($"File Mode: {(fileMode == FileHandlingMode.Overwrite ? "overwrite" : fileMode == FileHandlingMode.SkipExisting ? "skip existing" : "unspecified")}");
+            var fileModeLabel = fileMode == FileHandlingMode.Overwrite ? (recreatedOutputDir ? "overwrite (recreated from scratch)" : "overwrite")
+                : fileMode == FileHandlingMode.SkipExisting ? "skip existing"
+                : "unspecified";
+            RunLogger.Info($"File Mode: {fileModeLabel}");
             if (verbose)
                 RunLogger.Info("Verbose:   enabled");
             RunLogger.Info(string.Empty);
 
             return await Extract(installDir, outputDir, selectedBundles, assetTypes, maxParallelBundles, maxParallelConversions, verbose, fileMode);
+        }
+        catch (Exception ex)
+        {
+            // Last-resort catch-all: everything else in this file that can reasonably fail already
+            // handles it locally (per-asset failures land in Stats.FailureDetails, not here). This exists
+            // so a truly unexpected failure still exits cleanly with a one-line message instead of the
+            // .NET runtime dumping a raw stack trace to the console.
+            RunLogger.Error($"Unexpected error: {ex.Message}");
+            return 1;
         }
         finally
         {
@@ -296,11 +349,18 @@ public static class Program
                 continue;
             }
 
+            if (arg is "-recreate")
+            {
+                fileMode = FileHandlingMode.Recreate;
+                fileModeExplicitlySet = true;
+                continue;
+            }
+
             positional.Add(arg);
         }
 
         if (positional.Count != 0 && positional.Count != 2 && positional.Count != 3)
-            throw new ArgumentException("Usage: dw2extract.exe [<installDir> <outputDir> [bundleNameFilter]] [-overwrite | -skip-existing] [-j <count>] [--max-parallel-conversions <count>] [-v]");
+            throw new ArgumentException("Usage: dw2extract.exe [<installDir> <outputDir> [bundleNameFilter]] [-overwrite | -skip-existing | -recreate] [-j <count>] [--max-parallel-conversions <count>] [-v]");
 
         return new CommandLineOptions
         {
@@ -519,20 +579,52 @@ public static class Program
         FileHandlingMode? result = null;
         var thread = new Thread(() =>
         {
-            var choice = MessageBox.Show(
-                "Output folder already contains files.\n\n" +
-                "Yes = Overwrite existing files\n" +
-                "No = Skip existing files\n" +
-                "Cancel = Abort extraction",
-                "Distant Worlds 2 Asset Extractor",
-                MessageBoxButtons.YesNoCancel,
-                MessageBoxIcon.Question,
-                MessageBoxDefaultButton.Button3); // Default to Cancel
+            using var form = new Form
+            {
+                Text = "Output folder is not empty",
+                StartPosition = FormStartPosition.CenterScreen,
+                Width = 580,
+                Height = 260,
+                MinimizeBox = false,
+                MaximizeBox = false,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+            };
 
-            if (choice == DialogResult.Yes)
-                result = FileHandlingMode.Overwrite;
-            else if (choice == DialogResult.No)
-                result = FileHandlingMode.SkipExisting;
+            var label = new Label
+            {
+                Text = "The output folder already contains files. Choose how to handle them:",
+                Left = 10,
+                Top = 10,
+                AutoSize = true,
+            };
+
+            // Skip existing is the least destructive choice, so it's the one pre-selected — same
+            // "safe by default" intent as the old MessageBox defaulting its Enter key to Cancel.
+            // AutoSize (rather than a fixed Width) avoids clipping the longer labels below — a fixed
+            // pixel width that looks fine at design time can still clip at a different system font size
+            // or DPI scale, since RadioButton doesn't wrap text within its bounds by default.
+            var skipRadio = new RadioButton { Text = "Skip existing — leave already-extracted files alone", Left = 10, Top = 55, AutoSize = true, Checked = true };
+            var overwriteRadio = new RadioButton { Text = "Overwrite existing — replace files that already exist", Left = 10, Top = 82, AutoSize = true };
+            var recreateRadio = new RadioButton { Text = "Recreate from scratch — DELETES everything in the output folder first", Left = 10, Top = 109, AutoSize = true };
+
+            var okButton = new Button { Text = "OK", Left = 380, Top = 155, Width = 80, Height = 36, DialogResult = DialogResult.OK };
+            var cancelButton = new Button { Text = "Cancel", Left = 465, Top = 155, Width = 85, Height = 36, DialogResult = DialogResult.Cancel };
+
+            form.Controls.Add(label);
+            form.Controls.Add(skipRadio);
+            form.Controls.Add(overwriteRadio);
+            form.Controls.Add(recreateRadio);
+            form.Controls.Add(okButton);
+            form.Controls.Add(cancelButton);
+            form.AcceptButton = okButton;
+            form.CancelButton = cancelButton;
+
+            if (form.ShowDialog() == DialogResult.OK)
+            {
+                result = recreateRadio.Checked ? FileHandlingMode.Recreate
+                    : overwriteRadio.Checked ? FileHandlingMode.Overwrite
+                    : FileHandlingMode.SkipExisting;
+            }
             // Cancel -> result stays null
         });
         thread.SetApartmentState(ApartmentState.STA);
